@@ -1,0 +1,21 @@
+appenders:
+  file:
+    kind: file
+    path: ".bookrab.log"
+    encoder:
+      pattern: "{d} {h({l})} {t} {f} - {m}{n}"
+  console:
+    kind: console
+
+root:
+  level: off
+
+loggers:
+  bookrab:
+    level: info
+    appenders:
+      - file
+  actix-web:
+    level: info
+    appenders:
+      - console
