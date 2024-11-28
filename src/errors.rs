@@ -1,36 +1,198 @@
-#[macro_export]
-macro_rules! api_error {
-    (1, $path:expr, $err:expr) => {{
-        let result = HttpResponse::InternalServerError().json(json!({ "error": "E0001: could not save file permanently.", "path": $path }));
-        error!("{:#?}", $err);
-        result
-    }};
-    (2, $path:expr, $err:expr) => {{
-        let result = HttpResponse::InternalServerError().json(json!({ "error": "E0002: could not create directory.", "path": $path }));
-        error!("{:#?}", $err);
-        result
-    }};
-    (3, $filename:expr) => {{
-        let result = HttpResponse::BadRequest().json(json!({ "error": "E0003: file should have 'text/plain' content type.", "filename": $filename}));
-        result
-    }};
-    (4, $path:expr, $err:expr) => {{
-        let result = HttpResponse::InternalServerError().json(json!({ "error": "E0004: could not write metadata.", "path": $path }));
-        error!("{:#?}", $err);
-        result
-    }};
-    (5, $path:expr, $err:expr) => {{
-        let result = HttpResponse::InternalServerError().json(json!({ "error": "E0005: one of your book folders is messed up.", "path": $path }));
-        error!("{:#?}", $err);
-        result
-    }};
-    (6, $err:expr) => {{
-        let result = HttpResponse::InternalServerError().json(json!({ "error": "E0006: couldnt read child of your book folder."}));
-        error!("{:#?}", $err);
-        result
-    }};
-    (7, $metadata:expr) => {{
-        let result = HttpResponse::InternalServerError().json(json!({ "error": "E0007: invalid metadata.", "metadata": $metadata}));
-        result
-        }}
+use actix_web::{
+    body::BoxBody,
+    http::{header::ContentType, StatusCode},
+    HttpResponse,
+};
+use serde::Serialize;
+use serde_json::json;
+pub const E0001_MSG: &str = "E0001: could not save file permanently.";
+pub const E0002_MSG: &str = "E0002: could not create directory.";
+pub const E0003_MSG: &str = "E0003: file should have 'text/plain' content type.";
+pub const E0004_MSG: &str = "E0004: could not write metadata.";
+pub const E0005_MSG: &str = "E0005: one of your book folders is messed up.";
+pub const E0006_MSG: &str = "E0006: couldnt read child of your book folder.";
+pub const E0007_MSG: &str = "E0007: invalid metadata.";
+
+macro_rules! impl_responder {
+    ($struct: ident, $status: expr, $msg: expr) => {
+        impl $struct {
+            /// Converts value to [`HttpResponse`]
+            pub fn to_res(self) -> HttpResponse<BoxBody>
+            where
+                Self: Serialize + Sized,
+            {
+                let mut body = serde_json::to_value(&self).unwrap();
+                body["error"] = json!($msg);
+
+                HttpResponse::Ok()
+                    .status($status)
+                    .content_type(ContentType::json())
+                    .body(body.to_string())
+            }
+        }
+    };
 }
+
+/// Responds with [`E0001_MSG`]
+/// Server couldn't turn a temporary file into a permanent file.
+#[derive(serde::Serialize, utoipa::ToSchema, utoipa::ToResponse)]
+pub struct CouldntSaveFile {
+    #[schema(default = json!(E0001_MSG))]
+    pub error: String,
+    pub path: String,
+}
+
+impl CouldntSaveFile {
+    pub fn new(path: &str) -> Self {
+        Self {
+            error: E0001_MSG.to_string(),
+            path: path.to_string(),
+        }
+    }
+}
+
+impl_responder!(
+    CouldntSaveFile,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    E0001_MSG
+);
+
+/// Responds with [`E0002_MSG`]
+/// Server couldn't create a folder.
+#[derive(serde::Serialize, utoipa::ToSchema, utoipa::ToResponse)]
+pub struct CouldntCreateDir {
+    #[schema(default = json!(E0002_MSG))]
+    pub error: String,
+    pub path: String,
+}
+
+impl CouldntCreateDir {
+    pub fn new(path: &str) -> Self {
+        Self {
+            error: E0002_MSG.to_string(),
+            path: path.to_string(),
+        }
+    }
+}
+
+impl_responder!(
+    CouldntCreateDir,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    E0002_MSG
+);
+
+/// Responds with [`E0003_MSG`]
+/// You shoud've inputed a text file.
+#[derive(serde::Serialize, utoipa::ToSchema, utoipa::ToResponse)]
+pub struct ShouldBeTextPlain {
+    #[schema(default = json!(E0003_MSG))]
+    pub error: String,
+    pub filename: String,
+}
+
+impl ShouldBeTextPlain {
+    pub fn new(filename: &str) -> Self {
+        Self {
+            error: E0003_MSG.to_string(),
+            filename: filename.to_string(),
+        }
+    }
+}
+
+impl_responder!(ShouldBeTextPlain, StatusCode::BAD_REQUEST, E0003_MSG);
+
+/// Responds with [`E0004_MSG`]
+/// Server couldn't write file.
+#[derive(serde::Serialize, utoipa::ToSchema, utoipa::ToResponse)]
+pub struct CouldntWriteFile {
+    #[schema(default = json!(E0004_MSG))]
+    pub error: String,
+    pub path: String,
+}
+
+impl CouldntWriteFile {
+    pub fn new(path: &str) -> Self {
+        Self {
+            error: E0004_MSG.to_string(),
+            path: path.to_string(),
+        }
+    }
+}
+
+impl_responder!(
+    CouldntWriteFile,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    E0004_MSG
+);
+
+/// Responds with [`E0005_MSG`]
+/// Your book folder is messed up. Check it out.
+#[derive(serde::Serialize, utoipa::ToSchema, utoipa::ToResponse)]
+pub struct MessedUpBookFolder {
+    #[schema(default = json!(E0005_MSG))]
+    pub error: String,
+    pub path: String,
+}
+
+impl MessedUpBookFolder {
+    pub fn new(path: &str) -> Self {
+        Self {
+            error: E0005_MSG.to_string(),
+            path: path.to_string(),
+        }
+    }
+}
+
+impl_responder!(
+    MessedUpBookFolder,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    E0005_MSG
+);
+
+/// Responds with [`E0006_MSG`]
+/// Couldnt read folder inside parent.
+#[derive(serde::Serialize, utoipa::ToSchema, utoipa::ToResponse)]
+pub struct CouldntReadChild {
+    #[schema(default = json!(E0006_MSG))]
+    pub error: String,
+    pub parent: String,
+}
+
+impl CouldntReadChild {
+    pub fn new(parent: &str) -> Self {
+        Self {
+            error: E0006_MSG.to_string(),
+            parent: parent.to_string(),
+        }
+    }
+}
+
+impl_responder!(
+    CouldntReadChild,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    E0006_MSG
+);
+
+/// Responds with [`E0007_MSG`]
+/// Invalid metadata inside book folder.
+#[derive(serde::Serialize, utoipa::ToSchema, utoipa::ToResponse)]
+pub struct InvalidMetadata {
+    #[schema(default = json!(E0007_MSG))]
+    pub error: String,
+    pub metadata: String,
+}
+
+impl InvalidMetadata {
+    pub fn new(metadata: &str) -> Self {
+        Self {
+            error: E0007_MSG.to_string(),
+            metadata: metadata.to_string(),
+        }
+    }
+}
+
+impl_responder!(
+    InvalidMetadata,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    E0007_MSG
+);

@@ -25,3 +25,4 @@ Cargo.lock
 /target
 .books/
 .bookrab.log
+.bookrab-actix.log

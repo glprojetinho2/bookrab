@@ -4,18 +4,29 @@ appenders:
     path: ".bookrab.log"
     encoder:
       pattern: "{d} {h({l})} {t} {f} - {m}{n}"
+  actix:
+    kind: file
+    path: ".bookrab-actix.log"
+    encoder:
+      pattern: "{d} {h({l})} {t} {f} - {m}{n}"
   console:
     kind: console
 
 root:
-  level: off
+  level: info
+  appenders:
+    - console
 
 loggers:
   bookrab:
     level: info
     appenders:
       - file
-  actix-web:
+  actix_server:
     level: info
     appenders:
-      - console
+      - actix
+  actix_web:
+    level: info
+    appenders:
+      - actix
