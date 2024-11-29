@@ -1,4 +1,5 @@
-use std::{fs, path::PathBuf};
+use crate::{errors::CouldntReadFile, views::books::RootBookDir};
+use std::{io::Read, path::PathBuf};
 
 use actix_multipart::form::{json::Json, tempfile::TempFile, MultipartForm};
 use actix_web::{post, Responder};
@@ -11,7 +12,8 @@ use crate::{
 };
 
 use super::BookMetadata;
-use crate::views::books::list::{BookListElement, _list};
+use crate::views::books::list::_list;
+use crate::views::books::BookListElement;
 
 /// Represents a form for book uploading.
 /// The books currently have to be .txt files.
@@ -46,7 +48,9 @@ enum UploadError {
 #[post("/upload")]
 pub async fn upload(MultipartForm(form): MultipartForm<BookForm>) -> impl Responder {
     let config = get_config();
-    let file = form.book;
+    let book_dir = RootBookDir::new(config.book_path);
+
+    let mut file = form.book;
     if let Some(v) = file.content_type {
         if v != "text/plain" {
             return ShouldBeTextPlain::new(file.file_name.unwrap_or("".to_string()).as_str())
@@ -54,58 +58,11 @@ pub async fn upload(MultipartForm(form): MultipartForm<BookForm>) -> impl Respon
         }
     };
     let file_name = PathBuf::from(file.file_name.unwrap());
-    let mut file_path = config.book_path.clone();
-    file_path.push(file_name);
-
-    // create book directory if it doesn't exist
-    match fs::create_dir_all(file_path.clone()) {
-        Ok(v) => v,
-        Err(e) => match e.kind() {
-            std::io::ErrorKind::AlreadyExists => (),
-            _ => {
-                return {
-                    error!("{:#?}", e);
-                    CouldntCreateDir::new(
-                        file_path
-                            .to_str()
-                            .unwrap_or("path is not even valid unicode"),
-                    )
-                    .to_res()
-                }
-            }
-        },
-    }
-
-    // save text of the book
-    file_path.push("txt");
-    if let Err(e) = file.file.persist(file_path.clone()) {
-        return {
-            error!("{:#?}", e);
-            CouldntSaveFile::new(
-                file_path
-                    .to_str()
-                    .unwrap_or("path is not even valid unicode"),
-            )
-            .to_res()
-        };
+    let mut txt = String::new();
+    if let Err(e) = file.file.read_to_string(&mut txt) {
+        error!("{e:#?}");
+        return CouldntReadFile::new(&file_name).to_res();
     };
 
-    // save metadata of the book
-    file_path.pop();
-    file_path.push("metadata.json");
-    let metadata = serde_json::to_string(&*form.metadata)
-        .expect("couldnt convert metadata do a string (bruh)");
-    if let Err(e) = fs::write(file_path.clone(), metadata) {
-        return {
-            error!("{:#?}", e);
-            CouldntWriteFile::new(
-                file_path
-                    .to_str()
-                    .unwrap_or("path is not even valid unicode"),
-            )
-            .to_res()
-        };
-    };
-
-    _list().await
+    _list(get_config()).await
 }
