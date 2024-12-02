@@ -11,7 +11,6 @@ use crate::{
     errors::{CouldntCreateDir, CouldntSaveFile, CouldntWriteFile, ShouldBeTextPlain},
 };
 
-use super::BookMetadata;
 use crate::views::books::list::_list;
 use crate::views::books::BookListElement;
 
@@ -23,8 +22,8 @@ struct BookForm {
     #[schema(value_type = String, format = "binary")]
     book: TempFile,
     /// Book metadata
-    #[schema(value_type = BookMetadata)]
-    metadata: Json<BookMetadata>,
+    #[schema(value_type = Vec<String>)]
+    tags: Json<Vec<String>>,
 }
 /// Represents internal server errors that could be returned from the
 /// book uploading endpoint.

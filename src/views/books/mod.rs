@@ -20,7 +20,7 @@ pub struct BookListElement {
     /// Book title
     book: String,
     /// Book metadata for filtering
-    metadata: BookMetadata,
+    tags: Vec<String>,
 }
 
 /// Represents a root book folder.
@@ -30,16 +30,17 @@ pub struct BookListElement {
 /// path/to/root_book_dir/ <= this is the `path` we use in this struct
 /// ├─ book_title1/ <= folder with the book's title as its name
 /// │  ├─ txt <= full text of the book
-/// │  ├─ metadata.json <= metadata of the book (see [`BookMetadata`])
+/// │  ├─ tags.json <= tags
 /// ├─ book_title2/
 /// │  ├─ txt
-/// │  ├─ metadata.json
+/// │  ├─ tags.json
 /// ```
 pub struct RootBookDir {
     path: PathBuf,
 }
 
 impl RootBookDir {
+    const INFO_PATH: &str = "tags.json";
     pub fn new(path: PathBuf) -> Self {
         RootBookDir { path }
     }
@@ -54,8 +55,9 @@ impl RootBookDir {
         Ok(())
     }
 
+    /// Lists all books in the form of [BookListElement]
     pub async fn list(&self) -> Result<Vec<BookListElement>, BookrabError> {
-        let books_dir = match fs::read_dir(&self.path.clone()) {
+        let books_dir = match fs::read_dir(self.path.clone()) {
             Ok(v) => v,
             Err(e) => {
                 error!("{e:#?}");
@@ -74,8 +76,7 @@ impl RootBookDir {
                         error!("{:#?}", e);
                         Err(BookrabError::CouldntReadChild(
                             CouldntReadChild::new(
-                                &self
-                                    .path
+                                self.path
                                     .to_str()
                                     .unwrap_or("path is not even valid unicode"),
                             ),
@@ -87,47 +88,32 @@ impl RootBookDir {
             let book_title = book_dir.file_name().to_str().unwrap().to_string();
 
             // extract metadata
-            let metadata_path = book_dir.path().join("metadata.json");
-            let metadata_contents;
-            if metadata_path.exists() {
-                metadata_contents = match fs::read_to_string(&metadata_path) {
+            let tags_path = book_dir.path().join(Self::INFO_PATH);
+            let tags_contents = if tags_path.exists() {
+                match fs::read_to_string(&tags_path) {
                     Ok(v) => v,
                     Err(e) => {
                         return {
                             error!("{e:#?}");
                             Err(BookrabError::CouldntReadFile(
-                                CouldntReadFile::new(&metadata_path),
+                                CouldntReadFile::new(&tags_path),
                                 anyhow!(e),
                             ))
                         }
                     }
                 }
             } else {
-                //TODO: there must be a better way of doing this
-                metadata_contents = serde_json::to_string(&BookMetadata::default())
-                    .expect("default metadata couldnt be parsed.");
-                match fs::write(&metadata_path, metadata_contents.clone()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return {
-                            error!("{e:#?}");
-                            Err(BookrabError::CouldntWriteFile(
-                                CouldntWriteFile::new(&metadata_path),
-                                anyhow!(e),
-                            ))
-                        }
-                    }
-                };
-            }
-            let metadata_json: BookMetadata = match serde_json::from_str(metadata_contents.as_str())
-            {
+                let _ = fs::write(&tags_path, "[]");
+                "[]".to_string()
+            };
+            let tags: Vec<String> = match serde_json::from_str(tags_contents.as_str()) {
                 Ok(v) => v,
                 Err(e) => {
                     return {
                         error!("{:#?}", e);
                         Err(BookrabError::InvalidMetadata(InvalidMetadata::new(
-                            metadata_contents.as_str(),
-                            &metadata_path,
+                            tags_contents.as_str(),
+                            &tags_path,
                         )))
                     }
                 }
@@ -135,7 +121,7 @@ impl RootBookDir {
 
             result.push(BookListElement {
                 book: book_title,
-                metadata: metadata_json,
+                tags,
             });
         }
 
@@ -147,7 +133,7 @@ impl RootBookDir {
         &self,
         book_name: &str,
         txt: &str,
-        metadata: BookMetadata,
+        tags: Vec<String>,
     ) -> Result<(), BookrabError> {
         // create book directory if it doesn't exist
         let book_path = &self.path.join(book_name);
@@ -169,24 +155,17 @@ impl RootBookDir {
         };
 
         // write metadata
-        let metadata_str = serde_json::to_string(&metadata)
-            .expect("BookMetadata could not be converted to string");
-        let metadata_path = book_path.join("metadata.json");
-        if let Err(e) = fs::write(&metadata_path, metadata_str) {
+        let tags_str =
+            serde_json::to_string(&tags).expect("BookMetadata could not be converted to string");
+        let tags_path = book_path.join(Self::INFO_PATH);
+        if let Err(e) = fs::write(&tags_path, tags_str) {
             return Err(BookrabError::CouldntWriteFile(
-                CouldntWriteFile::new(&metadata_path),
+                CouldntWriteFile::new(&tags_path),
                 anyhow!(e),
             ));
         };
         Ok(())
     }
-}
-
-// Book metadata for filtering
-#[derive(Default, Debug, ToSchema, Deserialize, Serialize, PartialEq)]
-pub struct BookMetadata {
-    author: String,
-    tags: Vec<String>,
 }
 
 pub fn configure() -> impl FnOnce(&mut ServiceConfig) {
@@ -196,10 +175,7 @@ pub fn configure() -> impl FnOnce(&mut ServiceConfig) {
 }
 #[cfg(test)]
 mod tests {
-    use crate::{
-        config::BookrabConfig,
-        views::books::{BookMetadata, RootBookDir},
-    };
+    use crate::views::books::RootBookDir;
     use rand::{distributions::Alphanumeric, Rng};
     use std::{env::temp_dir, fs};
 
@@ -217,11 +193,27 @@ mod tests {
         root.create().expect("couldnt create root dir");
         root
     }
-    fn basic_metadata() -> BookMetadata {
-        BookMetadata {
-            author: "Camões".to_string(),
-            tags: vec!["Literatura Portuguesa".to_string()],
-        }
+    fn basic_metadata() -> Vec<String> {
+        vec!["Camões".to_string(), "Literatura Portuguesa".to_string()]
+    }
+
+    #[actix_web::test]
+    async fn basic_uploading() -> Result<(), anyhow::Error> {
+        let book_dir = create_book_dir();
+        book_dir
+            .upload(
+                "lusiadas",
+                "As armas e os barões assinalados",
+                basic_metadata(),
+            )
+            .unwrap();
+        let txt = fs::read_to_string(book_dir.path.join("lusiadas").join("txt"))
+            .expect("couldnt read txt (file not created?)");
+        let tags = fs::read_to_string(book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH))
+            .expect("couldnt read info (file not created?)");
+        assert_eq!(txt, "As armas e os barões assinalados");
+        assert_eq!(tags, serde_json::to_string(&basic_metadata()).unwrap());
+        Ok(())
     }
     #[actix_web::test]
     async fn basic_listing() -> Result<(), anyhow::Error> {
@@ -233,10 +225,7 @@ mod tests {
             body[0],
             BookListElement {
                 book: "lusiadas".to_string(),
-                metadata: BookMetadata {
-                    author: "Camões".to_string(),
-                    tags: vec!["Literatura Portuguesa".to_string()],
-                },
+                tags: basic_metadata(),
             }
         );
         Ok(())
@@ -254,20 +243,14 @@ mod tests {
             body[0],
             BookListElement {
                 book: "lusiadas".to_string(),
-                metadata: BookMetadata {
-                    author: "Camões".to_string(),
-                    tags: vec!["Literatura Portuguesa".to_string()],
-                },
+                tags: basic_metadata(),
             }
         );
         assert_eq!(
             body[1],
             BookListElement {
                 book: "sonetos".to_string(),
-                metadata: BookMetadata {
-                    author: "Camões".to_string(),
-                    tags: vec!["Literatura Portuguesa".to_string()],
-                },
+                tags: basic_metadata(),
             }
         );
         Ok(())
@@ -277,7 +260,7 @@ mod tests {
     async fn list_invalid_metadata() -> Result<(), anyhow::Error> {
         let book_dir = create_book_dir();
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
-        let metadata_path = book_dir.path.join("lusiadas").join("metadata.json");
+        let metadata_path = book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH);
         fs::write(&metadata_path, "meeeeeeeeeeeeeeeeeeeessed up").unwrap();
 
         match book_dir.list().await.unwrap_err() {
