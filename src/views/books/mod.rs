@@ -78,6 +78,20 @@ impl RootBookDir {
         Ok(())
     }
 
+    /// Gets book according to its title.
+    pub async fn get_by_title(
+        &self,
+        title: String,
+    ) -> Result<Option<BookListElement>, BookrabError> {
+        let list = self.list().await?;
+        let result: Vec<BookListElement> = list
+            .into_iter()
+            .filter(|book| book.title == title)
+            .collect();
+        // there are not going to be any duplicates
+        Ok(result.into_iter().next())
+    }
+
     /// Lists books according to their tags.
     /// No included tags = include all tags.
     /// No excluded tags = exclude no tags.
@@ -495,4 +509,22 @@ mod tests {
         },
         HashSet::from(s(vec![]))
     );
+
+    #[actix_web::test]
+    async fn get_by_title() -> Result<(), anyhow::Error> {
+        let book_dir = create_book_dir();
+        book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
+        let book = book_dir
+            .get_by_title("lusiadas".to_string())
+            .await?
+            .unwrap();
+        assert_eq!(
+            book,
+            BookListElement {
+                title: "lusiadas".to_string(),
+                tags: basic_metadata(),
+            }
+        );
+        Ok(())
+    }
 }
