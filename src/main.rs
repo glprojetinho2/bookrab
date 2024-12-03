@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .service(utoipa_actix_web::scope("/v1/books").configure(views::books::configure()))
             .app_data(TempFileConfig::default().directory(&config.book_path))
-            .openapi_service(|api| Redoc::with_url("/redoc", api))
+            .openapi_service(|api| Redoc::with_url("/v1/redoc", api))
             // .openapi_service(|api| {
             //     RapiDoc::with_openapi("/api-docs/openapi.json", api).path("/rapidoc")
             // })

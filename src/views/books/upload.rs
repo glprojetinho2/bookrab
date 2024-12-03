@@ -1,8 +1,8 @@
-use crate::{errors::CouldntReadFile, views::books::RootBookDir};
-use std::{io::Read, path::PathBuf};
+use crate::{errors::CouldntReadFile, errors::NotUnicode, views::books::RootBookDir};
+use std::{collections::HashSet, io::Read, path::PathBuf};
 
 use actix_multipart::form::{json::Json, tempfile::TempFile, MultipartForm};
-use actix_web::{post, Responder};
+use actix_web::{post, HttpResponse, Responder};
 use log::error;
 use utoipa::{ToResponse, ToSchema};
 
@@ -11,7 +11,6 @@ use crate::{
     errors::{CouldntCreateDir, CouldntSaveFile, CouldntWriteFile, ShouldBeTextPlain},
 };
 
-use crate::views::books::list::_list;
 use crate::views::books::BookListElement;
 
 /// Represents a form for book uploading.
@@ -21,7 +20,7 @@ struct BookForm {
     /// Book in the .txt format
     #[schema(value_type = String, format = "binary")]
     book: TempFile,
-    /// Book metadata
+    /// Book tags
     #[schema(value_type = Vec<String>)]
     tags: Json<Vec<String>>,
 }
@@ -33,13 +32,14 @@ enum UploadError {
     CouldntCreateDir(#[content("application/json")] CouldntCreateDir),
     CouldntWriteMetadata(#[content("application/json")] CouldntWriteFile),
     CouldntSaveFile(#[content("application/json")] CouldntSaveFile),
+    NotUnicode(#[content("application/json")] NotUnicode),
 }
 
 /// Uploads a book to be searched later.
 #[utoipa::path(
     request_body(content_type = "multipart/form-data", content = BookForm),
     responses (
-        (status = 200, description = "Success", body = [BookListElement]),
+        (status = 200, description = "Success (without response body)"),
         (status = 400, content((ShouldBeTextPlain = "application/json"))),
         (status = 500, content((UploadError)))
     )
@@ -62,6 +62,17 @@ pub async fn upload(MultipartForm(form): MultipartForm<BookForm>) -> impl Respon
         error!("{e:#?}");
         return CouldntReadFile::new(&file_name).to_res();
     };
+    let mut tags = HashSet::new();
+    for tag in form.tags.iter() {
+        tags.insert(tag.to_string());
+    }
+    let title = match file_name.to_str() {
+        Some(v) => v,
+        None => return NotUnicode::new(file_name.to_string_lossy().to_string()).to_res(),
+    };
 
-    _list(get_config()).await
+    if let Err(e) = book_dir.upload(title, txt.as_str(), tags) {
+        return e.to_res();
+    };
+    HttpResponse::Ok().finish()
 }

@@ -2,7 +2,7 @@ mod list;
 mod upload;
 use anyhow::anyhow;
 use log::error;
-use std::{fs, io, path::PathBuf};
+use std::{collections::HashSet, fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -18,11 +18,34 @@ use crate::errors::{
 #[derive(Debug, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct BookListElement {
     /// Book title
-    book: String,
+    title: String,
     /// Book metadata for filtering
-    tags: Vec<String>,
+    tags: HashSet<String>,
 }
 
+/// Manages the way that books will be filtered by tags.
+pub enum FilterMode {
+    /// Grabs books that have all of the tags.
+    All,
+    /// Grabs books that have any of the tags.
+    Any,
+}
+
+/// Represents a tag filter.
+pub enum TagFilter {
+    Exclude(Exclude),
+    Include(Include),
+}
+/// Excludes matched books
+pub struct Exclude {
+    mode: FilterMode,
+    tags: HashSet<String>,
+}
+/// Include matched books
+pub struct Include {
+    mode: FilterMode,
+    tags: HashSet<String>,
+}
 /// Represents a root book folder.
 /// In this folder we are going to store texts and metadata
 /// in the way explained bellow:
@@ -53,6 +76,61 @@ impl RootBookDir {
             }
         }
         Ok(())
+    }
+
+    /// Lists books according to their tags.
+    /// No included tags = include all tags.
+    /// No excluded tags = exclude no tags.
+    /// These apply regardless of the mode of the inclusion/exclusion.
+    pub async fn list_by_tags(
+        &self,
+        include: Include,
+        exclude: Exclude,
+    ) -> Result<Vec<BookListElement>, BookrabError> {
+        let list = self.list().await?;
+        let result = list
+            .into_iter()
+            .filter(|book| {
+                let includes = if include.tags.len() > 0 {
+                    match include.mode {
+                        FilterMode::Any => {
+                            include
+                                .tags
+                                .intersection(&book.tags)
+                                .collect::<Vec<&String>>()
+                                .len()
+                                > 0
+                        }
+                        FilterMode::All => {
+                            include.tags.union(&book.tags).collect::<Vec<_>>().len()
+                                == book.tags.len()
+                        }
+                    }
+                } else {
+                    true
+                };
+                let excludes = if exclude.tags.len() > 0 {
+                    match exclude.mode {
+                        FilterMode::Any => {
+                            exclude
+                                .tags
+                                .intersection(&book.tags)
+                                .collect::<Vec<&String>>()
+                                .len()
+                                > 0
+                        }
+                        FilterMode::All => {
+                            exclude.tags.union(&book.tags).collect::<Vec<_>>().len()
+                                == book.tags.len()
+                        }
+                    }
+                } else {
+                    false
+                };
+                includes && !excludes
+            })
+            .collect();
+        Ok(result)
     }
 
     /// Lists all books in the form of [BookListElement]
@@ -106,7 +184,7 @@ impl RootBookDir {
                 let _ = fs::write(&tags_path, "[]");
                 "[]".to_string()
             };
-            let tags: Vec<String> = match serde_json::from_str(tags_contents.as_str()) {
+            let tags: HashSet<String> = match serde_json::from_str(tags_contents.as_str()) {
                 Ok(v) => v,
                 Err(e) => {
                     return {
@@ -120,7 +198,7 @@ impl RootBookDir {
             };
 
             result.push(BookListElement {
-                book: book_title,
+                title: book_title,
                 tags,
             });
         }
@@ -133,8 +211,8 @@ impl RootBookDir {
         &self,
         book_name: &str,
         txt: &str,
-        tags: Vec<String>,
-    ) -> Result<(), BookrabError> {
+        tags: HashSet<String>,
+    ) -> Result<&Self, BookrabError> {
         // create book directory if it doesn't exist
         let book_path = &self.path.join(book_name);
         if let Err(e) = fs::create_dir_all(book_path) {
@@ -164,7 +242,7 @@ impl RootBookDir {
                 anyhow!(e),
             ));
         };
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -181,6 +259,26 @@ mod tests {
 
     use super::*;
 
+    fn s(v: Vec<&str>) -> HashSet<String> {
+        v.into_iter().map(|v| v.to_string()).collect()
+    }
+    fn root_for_tag_tests() -> RootBookDir {
+        let book_dir = temp_dir().to_path_buf().join("tag_testing_bookrab");
+        let root = RootBookDir::new(book_dir);
+        if root.path.exists() {
+            return root;
+        }
+        root.create().expect("couldnt create root dir");
+        root.upload("1", "", s(vec!["a", "b", "c", "d"]))
+            .unwrap()
+            .upload("2", "", s(vec!["a", "b", "c"]))
+            .unwrap()
+            .upload("3", "", s(vec!["a", "b"]))
+            .unwrap()
+            .upload("4", "", s(vec!["a"]))
+            .unwrap();
+        root
+    }
     fn create_book_dir() -> RootBookDir {
         let random_name: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -188,13 +286,17 @@ mod tests {
             .map(char::from)
             .collect();
 
-        let book_dir = temp_dir().to_path_buf().join(random_name);
+        let book_dir = temp_dir()
+            .to_path_buf()
+            .join("bookrab-test".to_string() + &random_name);
         let root = RootBookDir::new(book_dir);
         root.create().expect("couldnt create root dir");
         root
     }
-    fn basic_metadata() -> Vec<String> {
+    fn basic_metadata() -> HashSet<String> {
         vec!["Camões".to_string(), "Literatura Portuguesa".to_string()]
+            .into_iter()
+            .collect()
     }
 
     #[actix_web::test]
@@ -209,10 +311,12 @@ mod tests {
             .unwrap();
         let txt = fs::read_to_string(book_dir.path.join("lusiadas").join("txt"))
             .expect("couldnt read txt (file not created?)");
-        let tags = fs::read_to_string(book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH))
-            .expect("couldnt read info (file not created?)");
+        let tags_txt =
+            fs::read_to_string(book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH))
+                .expect("couldnt read info (file not created?)");
+        let tags: HashSet<String> = serde_json::from_str(&tags_txt).unwrap();
         assert_eq!(txt, "As armas e os barões assinalados");
-        assert_eq!(tags, serde_json::to_string(&basic_metadata()).unwrap());
+        assert_eq!(tags, basic_metadata());
         Ok(())
     }
     #[actix_web::test]
@@ -224,7 +328,7 @@ mod tests {
         assert_eq!(
             body[0],
             BookListElement {
-                book: "lusiadas".to_string(),
+                title: "lusiadas".to_string(),
                 tags: basic_metadata(),
             }
         );
@@ -242,14 +346,14 @@ mod tests {
         assert_eq!(
             body[0],
             BookListElement {
-                book: "lusiadas".to_string(),
+                title: "lusiadas".to_string(),
                 tags: basic_metadata(),
             }
         );
         assert_eq!(
             body[1],
             BookListElement {
-                book: "sonetos".to_string(),
+                title: "sonetos".to_string(),
                 tags: basic_metadata(),
             }
         );
@@ -272,4 +376,74 @@ mod tests {
         }
         Ok(())
     }
+    macro_rules! test_filter {
+        ($name:ident, $include:expr, $exclude: expr, $expected: expr) => {
+            #[actix_web::test]
+            async fn $name() -> Result<(), anyhow::Error> {
+                let book_dir = root_for_tag_tests();
+                let include = $include;
+                let exclude = $exclude;
+                let books = book_dir.list_by_tags(include, exclude).await.unwrap();
+
+                let expected = $expected;
+                assert_eq!(books.len(), expected.len());
+                assert_eq!(
+                    books
+                        .into_iter()
+                        .map(|book| book.title)
+                        .collect::<HashSet<_>>(),
+                    expected
+                );
+                Ok(())
+            }
+        };
+    }
+    test_filter!(
+        filter_include_all,
+        Include {
+            mode: FilterMode::All,
+            tags: s(vec!["d", "c"])
+        },
+        Exclude {
+            mode: FilterMode::All,
+            tags: s(vec![]),
+        },
+        HashSet::from(s(vec!["1"]))
+    );
+    test_filter!(
+        filter_include_any,
+        Include {
+            mode: FilterMode::Any,
+            tags: s(vec!["d", "c"])
+        },
+        Exclude {
+            mode: FilterMode::All,
+            tags: s(vec![]),
+        },
+        HashSet::from(s(vec!["1", "2"]))
+    );
+    test_filter!(
+        filter_exclude_all,
+        Include {
+            mode: FilterMode::Any,
+            tags: s(vec![])
+        },
+        Exclude {
+            mode: FilterMode::All,
+            tags: s(vec!["d", "c"]),
+        },
+        HashSet::from(s(vec!["2", "3", "4"]))
+    );
+    test_filter!(
+        filter_exclude_any,
+        Include {
+            mode: FilterMode::Any,
+            tags: s(vec![])
+        },
+        Exclude {
+            mode: FilterMode::Any,
+            tags: s(vec!["d", "c"]),
+        },
+        HashSet::from(s(vec!["3", "4"]))
+    );
 }

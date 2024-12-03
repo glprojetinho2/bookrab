@@ -18,6 +18,7 @@ pub const E0006_MSG: &str = "E0006: couldnt read child of your book folder.";
 pub const E0007_MSG: &str = "E0007: invalid metadata.";
 pub const E0008_MSG: &str = "E0008: couldnt read file.";
 pub const E0009_MSG: &str = "E0009: couldnt read dir.";
+pub const E0010_MSG: &str = "E0010: not valid unicode.";
 
 macro_rules! impl_responder {
     ($struct: ident, $status: expr, $msg: expr) => {
@@ -266,6 +267,25 @@ impl CouldntReadDir {
 
 impl_responder!(CouldntReadDir, StatusCode::INTERNAL_SERVER_ERROR, E0009_MSG);
 
+/// Responds with [`E0010_MSG`]
+/// Something is not Unicode.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema, utoipa::ToResponse, Debug)]
+pub struct NotUnicode {
+    #[schema(default = json!(E0010_MSG))]
+    pub error: String,
+    pub what: String,
+}
+
+impl NotUnicode {
+    pub fn new(what: String) -> Self {
+        Self {
+            error: E0010_MSG.to_string(),
+            what,
+        }
+    }
+}
+
+impl_responder!(NotUnicode, StatusCode::BAD_REQUEST, E0010_MSG);
 /// Api errors that can be used outside of actix handlers.
 /// You should always be using this.
 #[derive(Error, Debug)]
@@ -288,6 +308,8 @@ pub enum BookrabError {
     CouldntReadFile(CouldntReadFile, anyhow::Error),
     #[error("{}\ncause: {:#?}", serde_json::to_string(.0).unwrap(), .1)]
     CouldntReadDir(CouldntReadDir, anyhow::Error),
+    #[error("{}\n", serde_json::to_string(.0).unwrap())]
+    NotUnicode(NotUnicode),
 }
 
 impl BookrabError {
@@ -321,6 +343,7 @@ impl BookrabError {
                 error!("{e:#?}");
                 err.to_res()
             }
+            Self::NotUnicode(err) => err.to_res(),
         }
     }
 }
