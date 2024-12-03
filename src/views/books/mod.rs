@@ -398,6 +398,7 @@ mod tests {
             }
         };
     }
+    // here we go
     test_filter!(
         filter_include_all,
         Include {
@@ -445,5 +446,53 @@ mod tests {
             tags: s(vec!["d", "c"]),
         },
         HashSet::from(s(vec!["3", "4"]))
+    );
+    test_filter!(
+        filter_include_any_exclude_any,
+        Include {
+            mode: FilterMode::Any,
+            tags: s(vec!["b"])
+        },
+        Exclude {
+            mode: FilterMode::Any,
+            tags: s(vec!["d", "c"]),
+        },
+        HashSet::from(s(vec!["3"]))
+    );
+    test_filter!(
+        filter_include_all_exclude_all,
+        Include {
+            mode: FilterMode::All,
+            tags: s(vec!["b"])
+        },
+        Exclude {
+            mode: FilterMode::All,
+            tags: s(vec!["b", "d"]),
+        },
+        HashSet::from(s(vec!["2", "3"]))
+    );
+    test_filter!(
+        filter_include_any_exclude_all,
+        Include {
+            mode: FilterMode::Any,
+            tags: s(vec!["c", "d", "b"])
+        },
+        Exclude {
+            mode: FilterMode::All,
+            tags: s(vec!["a", "d"]),
+        },
+        HashSet::from(s(vec!["2", "3"]))
+    );
+    test_filter!(
+        filter_include_all_exclude_any,
+        Include {
+            mode: FilterMode::All,
+            tags: s(vec!["c", "d", "b"])
+        },
+        Exclude {
+            mode: FilterMode::Any,
+            tags: s(vec!["a", "d"]),
+        },
+        HashSet::from(s(vec![]))
     );
 }
