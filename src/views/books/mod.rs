@@ -1,8 +1,9 @@
 mod list;
+mod test_utils;
 mod upload;
 use crate::errors::{GrepSearchError, InexistentBook};
 use anyhow::anyhow;
-use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+use grep_regex::RegexMatcher;
 use grep_searcher::{Searcher, Sink, SinkContextKind, SinkError};
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -49,23 +50,16 @@ pub struct Include {
     tags: HashSet<String>,
 }
 
-/// ```json
-/// [
-///   {
-///     "title": "Os Lusíadas",
-///     "results": [
-///       "text [match]match-text[/match]\n...context",
-///       "Na qual vos deu por [match]armas[match], e deixou\nAs que Ele para si na Cruz tomou)"
-///     ]
-///   }
-/// ]
-/// ```
+/// Associates search results with the title of a book.
 #[derive(Clone, Debug)]
 pub struct SearchResults {
     title: String,
     results: Vec<String>,
 }
+
 impl SearchResults {
+    /// Generates a BookSink instance that can
+    /// fill this instance with search results.
     fn sink(&mut self) -> BookSink {
         BookSink::new(self)
     }
@@ -77,18 +71,29 @@ impl SearchResults {
     }
 }
 
+/// Sink to be used in book searches.
+/// It doesn't support passthru.
 pub struct BookSink<'a> {
     results: &'a mut SearchResults,
     after_context_id: usize,
 }
 
 impl BookSink<'_> {
+    /// Creates new [BookSink] instance from [SearchResults] instance
     fn new(results: &mut SearchResults) -> BookSink {
         BookSink {
             results,
             after_context_id: 0,
         }
     }
+    /// Pushes string to the last entry in `self.results.results`.
+    /// The string is obtained by converting `bytes` into UTF-8.
+    /// Example in my pseudo-language:
+    /// ```
+    /// results == ["not last", "last"]
+    /// this_func(" string".bytes())
+    /// results == ["not last", "last string"]
+    /// ```
     fn push_to_last_entry(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
         let mut current_result = self.results.results.pop().unwrap_or_default();
         current_result += match std::str::from_utf8(bytes) {
@@ -101,11 +106,17 @@ impl BookSink<'_> {
 }
 impl Sink for BookSink<'_> {
     type Error = std::io::Error;
+
     fn matched(
         &mut self,
         searcher: &grep_searcher::Searcher,
         mat: &grep_searcher::SinkMatch<'_>,
     ) -> Result<bool, Self::Error> {
+        // Mathes are always appended to the last
+        // entry of the results with `self.push_to_last_entry`.
+        // If there is no after_context, then matches are treated the
+        // same as the last contextual line of the `After` kind
+        // (see the comment in the context function).
         self.push_to_last_entry(mat.bytes())?;
         if searcher.after_context() == 0 {
             self.results.results.push("".to_string());
@@ -117,6 +128,18 @@ impl Sink for BookSink<'_> {
         searcher: &grep_searcher::Searcher,
         context: &grep_searcher::SinkContext<'_>,
     ) -> Result<bool, Self::Error> {
+        // Context lines are always appended to the last
+        // entry of the results with `self.push_to_last_entry`
+        // If the function detects that this is the last `After` context,
+        // it pushes an empty string to the results.
+        // # Example
+        // Let's say that the searcher has after_context = 2. In that case
+        // the Sink is going to process data in the following way:
+        // match comes in => results == ["match"]
+        // first contextual line => results == ["match context1"]
+        // second contextual line => results == ["match context1 context2", ""] <= observe the empty string
+        // another match => results = ["match context1 context2", "another match"]
+        // and so on.
         self.push_to_last_entry(context.bytes())?;
         if let SinkContextKind::After = context.kind() {
             self.after_context_id += 1;
@@ -133,6 +156,8 @@ impl Sink for BookSink<'_> {
         _searcher: &Searcher,
         _: &grep_searcher::SinkFinish,
     ) -> Result<(), Self::Error> {
+        // If the last element of `results` is an empty string,
+        // (I believe this is always the case) then remove it.
         if self
             .results
             .results
@@ -312,14 +337,16 @@ impl RootBookDir {
     }
 
     /// Uploads a single book.
+    /// If the book is already there (i.e root_dir/title exists),
+    /// the txt and tags are updated.
     pub fn upload(
         &self,
-        book_name: &str,
+        title: &str,
         txt: &str,
         tags: HashSet<String>,
     ) -> Result<&Self, BookrabError> {
         // create book directory if it doesn't exist
-        let book_path = &self.path.join(book_name);
+        let book_path = &self.path.join(title);
         if let Err(e) = fs::create_dir_all(book_path) {
             if e.kind() != std::io::ErrorKind::AlreadyExists {
                 return Err(BookrabError::CouldntCreateDir(
@@ -350,22 +377,10 @@ impl RootBookDir {
         Ok(self)
     }
 
-    //TODO: maybe delete this?
-    /// Gets the text of a book.
-    pub fn get_text(&self, title: String) -> Result<String, BookrabError> {
-        let txt_path = self.path.join(title).join("txt");
-        if txt_path.exists() {
-            return match fs::read_to_string(&txt_path) {
-                Ok(v) => Ok(v),
-                Err(e) => Err(BookrabError::CouldntReadFile(
-                    CouldntReadFile::new(&txt_path),
-                    anyhow!(e),
-                )),
-            };
-        }
-        Err(BookrabError::InexistentBook(InexistentBook::new(&txt_path)))
-    }
-
+    /// Searches stuff in a single book.
+    /// The search is configurable via parameters passed
+    /// to the searcher (after_context, for example) or to the
+    /// matcher (case_insensitive, for example).
     pub fn search(
         &self,
         title: String,
@@ -397,79 +412,55 @@ pub fn configure() -> impl FnOnce(&mut ServiceConfig) {
 }
 #[cfg(test)]
 mod tests {
+    use crate::views::books::test_utils::root_for_tag_tests;
+    use crate::views::books::test_utils::TXT;
     use crate::views::books::RootBookDir;
+    use grep_regex::RegexMatcherBuilder;
     use grep_searcher::SearcherBuilder;
-    use rand::{distributions::Alphanumeric, Rng};
-    use std::{env::temp_dir, fs};
+    use test_utils::{basic_metadata, create_book_dir, s};
 
     use super::*;
-
-    const TXT: &str = "A lei tenho daquele, a cujo império
-Obedece o visíbil e ínvisíbil
-Aquele que criou todo o Hemisfério,
-Tudo o que sente, o todo o insensíbil;
-Que padeceu desonra e vitupério,
-Sofrendo morte injusta e insofríbil,
-E que do Céu à Terra, enfim desceu,
-Por subir os mortais da Terra ao Céu.
-
-Deste Deus-Homem, alto e infinito,
-Os livros, que tu pedes não trazia,
-Que bem posso escusar trazer escrito
-Em papel o que na alma andar devia.
-Se as armas queres ver, como tens dito,
-Cumprido esse desejo te seria;
-Como amigo as verás; porque eu me obrigo,
-Que nunca as queiras ver como inimigo.
-
-Isto dizendo, manda os diligentes
-Ministros amostrar as armaduras:
-Vêm arneses, e peitos reluzentes,
-Malhas finas, e lâminas seguras,
-Escudos de pinturas diferentes,
-Pelouros, espingardas de aço puras,
-Arcos, e sagitíferas aljavas,
-Partazanas agudas, chuças bravas:";
-    fn s(v: Vec<&str>) -> HashSet<String> {
-        v.into_iter().map(|v| v.to_string()).collect()
-    }
-    fn create_book_dir() -> RootBookDir {
-        let random_name: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(15)
-            .map(char::from)
-            .collect();
-
-        let book_dir = temp_dir()
-            .to_path_buf()
-            .join("bookrab-test".to_string() + &random_name);
-        let root = RootBookDir::new(book_dir);
-        root.create().expect("couldnt create root dir");
-        root
-    }
-    fn basic_metadata() -> HashSet<String> {
-        vec!["Camões".to_string(), "Literatura Portuguesa".to_string()]
-            .into_iter()
-            .collect()
-    }
 
     #[test]
     fn basic_uploading() -> Result<(), anyhow::Error> {
         let book_dir = create_book_dir();
+        let expected_text = "As armas e os barões assinalados";
         book_dir
-            .upload(
-                "lusiadas",
-                "As armas e os barões assinalados",
-                basic_metadata(),
-            )
+            .upload("lusiadas", expected_text, basic_metadata())
             .unwrap();
+
         let txt = fs::read_to_string(book_dir.path.join("lusiadas").join("txt"))
             .expect("couldnt read txt (file not created?)");
         let tags_txt =
             fs::read_to_string(book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH))
                 .expect("couldnt read info (file not created?)");
         let tags: HashSet<String> = serde_json::from_str(&tags_txt).unwrap();
-        assert_eq!(txt, "As armas e os barões assinalados");
+        assert_eq!(txt, expected_text);
+        assert_eq!(tags, basic_metadata());
+        Ok(())
+    }
+    #[test]
+    fn overwriting_with_upload() -> Result<(), anyhow::Error> {
+        let book_dir = create_book_dir();
+        let expected_text = "As armas e os barões assinalados";
+        book_dir
+            .upload(
+                "lusiadas",
+                "whatever",
+                HashSet::from(["whatever".to_string()]),
+            )
+            .unwrap();
+        book_dir
+            .upload("lusiadas", expected_text, basic_metadata())
+            .unwrap();
+
+        let txt = fs::read_to_string(book_dir.path.join("lusiadas").join("txt"))
+            .expect("couldnt read txt (file not created?)");
+        let tags_txt =
+            fs::read_to_string(book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH))
+                .expect("couldnt read info (file not created?)");
+        let tags: HashSet<String> = serde_json::from_str(&tags_txt).unwrap();
+        assert_eq!(txt, expected_text);
         assert_eq!(tags, basic_metadata());
         Ok(())
     }
@@ -553,23 +544,6 @@ Partazanas agudas, chuças bravas:";
         };
     }
 
-    fn root_for_tag_tests() -> RootBookDir {
-        let book_dir = temp_dir().to_path_buf().join("tag_testing_bookrab");
-        let root = RootBookDir::new(book_dir);
-        if root.path.exists() {
-            return root;
-        }
-        root.create().expect("couldnt create root dir");
-        root.upload("1", "", s(vec!["a", "b", "c", "d"]))
-            .unwrap()
-            .upload("2", "", s(vec!["a", "b", "c"]))
-            .unwrap()
-            .upload("3", "", s(vec!["a", "b"]))
-            .unwrap()
-            .upload("4", "", s(vec!["a"]))
-            .unwrap();
-        root
-    }
     // here we go
     test_filter!(
         filter_include_all,
@@ -683,15 +657,6 @@ Partazanas agudas, chuças bravas:";
         Ok(())
     }
 
-    #[test]
-    fn get_text() -> Result<(), anyhow::Error> {
-        let book_dir = create_book_dir();
-        book_dir.upload("lusiadas", TXT, basic_metadata()).unwrap();
-        let txt = book_dir.get_text("lusiadas".to_string()).unwrap();
-        assert_eq!(txt, TXT);
-        Ok(())
-    }
-
     macro_rules! test_search {
         ($name:ident, $searcher: expr, $matcher: expr, $expected: expr) => {
             #[test]
@@ -750,5 +715,14 @@ Partazanas agudas, chuças bravas:";
                 "Cumprido esse desejo te seria;\nComo amigo as verás; porque eu me obrigo,\nQue nunca as queiras ver como inimigo.\n"
             ]
 
+    );
+    test_search!(
+        search_with_passthru,
+        SearcherBuilder::new().passthru(true).build(),
+        RegexMatcherBuilder::new()
+            .case_insensitive(true)
+            .build(r"\bpor\w*?")
+            .unwrap(),
+        vec![TXT]
     );
 }

@@ -11,8 +11,6 @@ use crate::{
     errors::{CouldntCreateDir, CouldntSaveFile, CouldntWriteFile, ShouldBeTextPlain},
 };
 
-use crate::views::books::BookListElement;
-
 /// Represents a form for book uploading.
 /// The books currently have to be .txt files.
 #[derive(Debug, MultipartForm, ToSchema)]
