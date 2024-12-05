@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use log::error;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -19,6 +20,9 @@ pub const E0007_MSG: &str = "E0007: invalid metadata.";
 pub const E0008_MSG: &str = "E0008: couldnt read file.";
 pub const E0009_MSG: &str = "E0009: couldnt read dir.";
 pub const E0010_MSG: &str = "E0010: not valid unicode.";
+pub const E0011_MSG: &str = "E0011: book doesnt exist.";
+pub const E0012_MSG: &str = "E0012: problematic regex pattern.";
+pub const E0013_MSG: &str = "E0013: couldn't search file (even though it exists).";
 
 macro_rules! impl_responder {
     ($struct: ident, $status: expr, $msg: expr) => {
@@ -286,6 +290,70 @@ impl NotUnicode {
 }
 
 impl_responder!(NotUnicode, StatusCode::BAD_REQUEST, E0010_MSG);
+
+/// Responds with [`E0011_MSG`]
+/// Book doesn't exist
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema, utoipa::ToResponse, Debug)]
+pub struct InexistentBook {
+    #[schema(default = json!(E0011_MSG))]
+    pub error: String,
+    pub path: String,
+}
+
+impl InexistentBook {
+    pub fn new(path: &PathBuf) -> Self {
+        Self {
+            error: E0011_MSG.to_string(),
+            path: path.to_str().unwrap_or("path is not unicode").to_string(),
+        }
+    }
+}
+
+impl_responder!(InexistentBook, StatusCode::BAD_REQUEST, E0011_MSG);
+
+/// Responds with [`E0012_MSG`]
+/// Check your regex.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema, utoipa::ToResponse, Debug)]
+pub struct RegexProblem {
+    #[schema(default = json!(E0012_MSG))]
+    pub error: String,
+    pub cause: String,
+}
+
+impl RegexProblem {
+    pub fn new(regex_error: grep_regex::Error) -> Self {
+        Self {
+            error: E0012_MSG.to_string(),
+            cause: format!("{:?}", regex_error),
+        }
+    }
+}
+
+impl_responder!(RegexProblem, StatusCode::BAD_REQUEST, E0012_MSG);
+
+/// Responds with [`E0013_MSG`]
+/// Book doesn't exist
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema, utoipa::ToResponse, Debug)]
+pub struct GrepSearchError {
+    #[schema(default = json!(E0013_MSG))]
+    pub error: String,
+    pub path: String,
+}
+
+impl GrepSearchError {
+    pub fn new(path: &PathBuf) -> Self {
+        Self {
+            error: E0013_MSG.to_string(),
+            path: path.to_str().unwrap_or("path is not unicode").to_string(),
+        }
+    }
+}
+
+impl_responder!(
+    GrepSearchError,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    E0013_MSG
+);
 /// Api errors that can be used outside of actix handlers.
 /// You should always be using this.
 #[derive(Error, Debug)]
@@ -310,6 +378,12 @@ pub enum BookrabError {
     CouldntReadDir(CouldntReadDir, anyhow::Error),
     #[error("{}\n", serde_json::to_string(.0).unwrap())]
     NotUnicode(NotUnicode),
+    #[error("{}\n", serde_json::to_string(.0).unwrap())]
+    InexistentBook(InexistentBook),
+    #[error("{}\ncause: {:#?}", serde_json::to_string(.0).unwrap(), .1)]
+    RegexProblem(RegexProblem, anyhow::Error),
+    #[error("{}\ncause: {:#?}", serde_json::to_string(.0).unwrap(), .1)]
+    GrepSearchError(GrepSearchError, anyhow::Error),
 }
 
 impl BookrabError {
@@ -344,6 +418,22 @@ impl BookrabError {
                 err.to_res()
             }
             Self::NotUnicode(err) => err.to_res(),
+            Self::InexistentBook(err) => err.to_res(),
+            Self::RegexProblem(err, e) => {
+                error!("{e:#?}");
+                err.to_res()
+            }
+            Self::GrepSearchError(err, e) => {
+                error!("{e:#?}");
+                err.to_res()
+            }
         }
+    }
+}
+
+impl From<grep_regex::Error> for BookrabError {
+    fn from(err: grep_regex::Error) -> Self {
+        let bookrab_error = RegexProblem::new(err.clone());
+        BookrabError::RegexProblem(bookrab_error, anyhow!(err))
     }
 }

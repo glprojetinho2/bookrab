@@ -24,12 +24,12 @@ enum ListError {
 )]
 #[get("/list")]
 pub async fn list() -> impl Responder {
-    _list(get_config()).await
+    _list(get_config())
 }
 
-pub async fn _list(config: BookrabConfig) -> HttpResponse {
+pub fn _list(config: BookrabConfig) -> HttpResponse {
     let book_dir = RootBookDir::new(config.book_path);
-    let listing = match book_dir.list().await {
+    let listing = match book_dir.list() {
         Ok(v) => v,
         Err(e) => return e.to_res(),
     };

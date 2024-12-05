@@ -1,10 +1,12 @@
 mod list;
 mod upload;
+use crate::errors::{GrepSearchError, InexistentBook};
 use anyhow::anyhow;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+use grep_searcher::{Searcher, Sink, SinkContextKind, SinkError};
 use log::error;
-use std::{collections::HashSet, fs, io, path::PathBuf};
-
 use serde::{Deserialize, Serialize};
+use std::{collections::HashSet, fs, io, path::PathBuf};
 use utoipa::ToSchema;
 use utoipa_actix_web::service_config::ServiceConfig;
 
@@ -46,6 +48,104 @@ pub struct Include {
     mode: FilterMode,
     tags: HashSet<String>,
 }
+
+/// ```json
+/// [
+///   {
+///     "title": "Os Lusíadas",
+///     "results": [
+///       "text [match]match-text[/match]\n...context",
+///       "Na qual vos deu por [match]armas[match], e deixou\nAs que Ele para si na Cruz tomou)"
+///     ]
+///   }
+/// ]
+/// ```
+#[derive(Clone, Debug)]
+pub struct SearchResults {
+    title: String,
+    results: Vec<String>,
+}
+impl SearchResults {
+    fn sink(&mut self) -> BookSink {
+        BookSink::new(self)
+    }
+    fn new(title: String) -> Self {
+        SearchResults {
+            title,
+            results: vec![],
+        }
+    }
+}
+
+pub struct BookSink<'a> {
+    results: &'a mut SearchResults,
+    after_context_id: usize,
+}
+
+impl BookSink<'_> {
+    fn new(results: &mut SearchResults) -> BookSink {
+        BookSink {
+            results,
+            after_context_id: 0,
+        }
+    }
+    fn push_to_last_entry(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
+        let mut current_result = self.results.results.pop().unwrap_or_default();
+        current_result += match std::str::from_utf8(bytes) {
+            Ok(matched) => matched,
+            Err(err) => return Err(std::io::Error::error_message(err)),
+        };
+        self.results.results.push(current_result);
+        Ok(())
+    }
+}
+impl Sink for BookSink<'_> {
+    type Error = std::io::Error;
+    fn matched(
+        &mut self,
+        searcher: &grep_searcher::Searcher,
+        mat: &grep_searcher::SinkMatch<'_>,
+    ) -> Result<bool, Self::Error> {
+        self.push_to_last_entry(mat.bytes())?;
+        if searcher.after_context() == 0 {
+            self.results.results.push("".to_string());
+        }
+        Ok(true)
+    }
+    fn context(
+        &mut self,
+        searcher: &grep_searcher::Searcher,
+        context: &grep_searcher::SinkContext<'_>,
+    ) -> Result<bool, Self::Error> {
+        self.push_to_last_entry(context.bytes())?;
+        if let SinkContextKind::After = context.kind() {
+            self.after_context_id += 1;
+            if self.after_context_id == searcher.after_context() {
+                self.after_context_id = 0;
+                self.results.results.push("".to_string());
+            }
+        }
+
+        Ok(true)
+    }
+    fn finish(
+        &mut self,
+        _searcher: &Searcher,
+        _: &grep_searcher::SinkFinish,
+    ) -> Result<(), Self::Error> {
+        if self
+            .results
+            .results
+            .last()
+            .unwrap_or(&String::new())
+            .is_empty()
+        {
+            self.results.results.pop();
+        };
+        Ok(())
+    }
+}
+
 /// Represents a root book folder.
 /// In this folder we are going to store texts and metadata
 /// in the way explained bellow:
@@ -53,7 +153,7 @@ pub struct Include {
 /// path/to/root_book_dir/ <= this is the `path` we use in this struct
 /// ├─ book_title1/ <= folder with the book's title as its name
 /// │  ├─ txt <= full text of the book
-/// │  ├─ tags.json <= tags
+/// │  ├─ tags.json <= json in the format `["tag1", "tag2", ...]`
 /// ├─ book_title2/
 /// │  ├─ txt
 /// │  ├─ tags.json
@@ -79,11 +179,8 @@ impl RootBookDir {
     }
 
     /// Gets book according to its title.
-    pub async fn get_by_title(
-        &self,
-        title: String,
-    ) -> Result<Option<BookListElement>, BookrabError> {
-        let list = self.list().await?;
+    pub fn get_by_title(&self, title: String) -> Result<Option<BookListElement>, BookrabError> {
+        let list = self.list()?;
         let result: Vec<BookListElement> = list
             .into_iter()
             .filter(|book| book.title == title)
@@ -96,25 +193,22 @@ impl RootBookDir {
     /// No included tags = include all tags.
     /// No excluded tags = exclude no tags.
     /// These apply regardless of the mode of the inclusion/exclusion.
-    pub async fn list_by_tags(
+    pub fn list_by_tags(
         &self,
         include: Include,
         exclude: Exclude,
     ) -> Result<Vec<BookListElement>, BookrabError> {
-        let list = self.list().await?;
+        let list = self.list()?;
         let result = list
             .into_iter()
             .filter(|book| {
-                let includes = if include.tags.len() > 0 {
+                let includes = if !include.tags.is_empty() {
                     match include.mode {
-                        FilterMode::Any => {
-                            include
-                                .tags
-                                .intersection(&book.tags)
-                                .collect::<Vec<&String>>()
-                                .len()
-                                > 0
-                        }
+                        FilterMode::Any => !include
+                            .tags
+                            .intersection(&book.tags)
+                            .collect::<Vec<&String>>()
+                            .is_empty(),
                         FilterMode::All => {
                             include.tags.union(&book.tags).collect::<Vec<_>>().len()
                                 == book.tags.len()
@@ -123,16 +217,13 @@ impl RootBookDir {
                 } else {
                     true
                 };
-                let excludes = if exclude.tags.len() > 0 {
+                let excludes = if !exclude.tags.is_empty() {
                     match exclude.mode {
-                        FilterMode::Any => {
-                            exclude
-                                .tags
-                                .intersection(&book.tags)
-                                .collect::<Vec<&String>>()
-                                .len()
-                                > 0
-                        }
+                        FilterMode::Any => !exclude
+                            .tags
+                            .intersection(&book.tags)
+                            .collect::<Vec<&String>>()
+                            .is_empty(),
                         FilterMode::All => {
                             exclude.tags.union(&book.tags).collect::<Vec<_>>().len()
                                 == book.tags.len()
@@ -148,7 +239,7 @@ impl RootBookDir {
     }
 
     /// Lists all books in the form of [BookListElement]
-    pub async fn list(&self) -> Result<Vec<BookListElement>, BookrabError> {
+    pub fn list(&self) -> Result<Vec<BookListElement>, BookrabError> {
         let books_dir = match fs::read_dir(self.path.clone()) {
             Ok(v) => v,
             Err(e) => {
@@ -258,6 +349,45 @@ impl RootBookDir {
         };
         Ok(self)
     }
+
+    //TODO: maybe delete this?
+    /// Gets the text of a book.
+    pub fn get_text(&self, title: String) -> Result<String, BookrabError> {
+        let txt_path = self.path.join(title).join("txt");
+        if txt_path.exists() {
+            return match fs::read_to_string(&txt_path) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(BookrabError::CouldntReadFile(
+                    CouldntReadFile::new(&txt_path),
+                    anyhow!(e),
+                )),
+            };
+        }
+        Err(BookrabError::InexistentBook(InexistentBook::new(&txt_path)))
+    }
+
+    pub fn search(
+        &self,
+        title: String,
+        mut searcher: Searcher,
+        matcher: RegexMatcher,
+    ) -> Result<SearchResults, BookrabError> {
+        let mut results = SearchResults::new(title.clone());
+        let book_path = self.path.join(title).join("txt");
+        if book_path.exists() {
+            if let Err(e) = searcher.search_path(matcher, &book_path, &mut results.sink()) {
+                return Err(BookrabError::GrepSearchError(
+                    GrepSearchError::new(&book_path),
+                    anyhow!(e),
+                ));
+            };
+        } else {
+            return Err(BookrabError::InexistentBook(InexistentBook::new(
+                &book_path,
+            )));
+        }
+        Ok(results)
+    }
 }
 
 pub fn configure() -> impl FnOnce(&mut ServiceConfig) {
@@ -268,30 +398,40 @@ pub fn configure() -> impl FnOnce(&mut ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use crate::views::books::RootBookDir;
+    use grep_searcher::SearcherBuilder;
     use rand::{distributions::Alphanumeric, Rng};
     use std::{env::temp_dir, fs};
 
     use super::*;
 
+    const TXT: &str = "A lei tenho daquele, a cujo império
+Obedece o visíbil e ínvisíbil
+Aquele que criou todo o Hemisfério,
+Tudo o que sente, o todo o insensíbil;
+Que padeceu desonra e vitupério,
+Sofrendo morte injusta e insofríbil,
+E que do Céu à Terra, enfim desceu,
+Por subir os mortais da Terra ao Céu.
+
+Deste Deus-Homem, alto e infinito,
+Os livros, que tu pedes não trazia,
+Que bem posso escusar trazer escrito
+Em papel o que na alma andar devia.
+Se as armas queres ver, como tens dito,
+Cumprido esse desejo te seria;
+Como amigo as verás; porque eu me obrigo,
+Que nunca as queiras ver como inimigo.
+
+Isto dizendo, manda os diligentes
+Ministros amostrar as armaduras:
+Vêm arneses, e peitos reluzentes,
+Malhas finas, e lâminas seguras,
+Escudos de pinturas diferentes,
+Pelouros, espingardas de aço puras,
+Arcos, e sagitíferas aljavas,
+Partazanas agudas, chuças bravas:";
     fn s(v: Vec<&str>) -> HashSet<String> {
         v.into_iter().map(|v| v.to_string()).collect()
-    }
-    fn root_for_tag_tests() -> RootBookDir {
-        let book_dir = temp_dir().to_path_buf().join("tag_testing_bookrab");
-        let root = RootBookDir::new(book_dir);
-        if root.path.exists() {
-            return root;
-        }
-        root.create().expect("couldnt create root dir");
-        root.upload("1", "", s(vec!["a", "b", "c", "d"]))
-            .unwrap()
-            .upload("2", "", s(vec!["a", "b", "c"]))
-            .unwrap()
-            .upload("3", "", s(vec!["a", "b"]))
-            .unwrap()
-            .upload("4", "", s(vec!["a"]))
-            .unwrap();
-        root
     }
     fn create_book_dir() -> RootBookDir {
         let random_name: String = rand::thread_rng()
@@ -313,8 +453,8 @@ mod tests {
             .collect()
     }
 
-    #[actix_web::test]
-    async fn basic_uploading() -> Result<(), anyhow::Error> {
+    #[test]
+    fn basic_uploading() -> Result<(), anyhow::Error> {
         let book_dir = create_book_dir();
         book_dir
             .upload(
@@ -333,11 +473,11 @@ mod tests {
         assert_eq!(tags, basic_metadata());
         Ok(())
     }
-    #[actix_web::test]
-    async fn basic_listing() -> Result<(), anyhow::Error> {
+    #[test]
+    fn basic_listing() -> Result<(), anyhow::Error> {
         let book_dir = create_book_dir();
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
-        let body = book_dir.list().await.unwrap();
+        let body = book_dir.list().unwrap();
         assert_eq!(body.len(), 1);
         assert_eq!(
             body[0],
@@ -349,13 +489,13 @@ mod tests {
         Ok(())
     }
 
-    #[actix_web::test]
-    async fn list_two_items() -> Result<(), anyhow::Error> {
+    #[test]
+    fn list_two_items() -> Result<(), anyhow::Error> {
         let book_dir = create_book_dir();
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
         book_dir.upload("sonetos", "", basic_metadata()).unwrap();
 
-        let body = book_dir.list().await.unwrap();
+        let body = book_dir.list().unwrap();
         assert_eq!(body.len(), 2);
         assert_eq!(
             body[0],
@@ -374,14 +514,14 @@ mod tests {
         Ok(())
     }
 
-    #[actix_web::test]
-    async fn list_invalid_metadata() -> Result<(), anyhow::Error> {
+    #[test]
+    fn list_invalid_metadata() -> Result<(), anyhow::Error> {
         let book_dir = create_book_dir();
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
         let metadata_path = book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH);
         fs::write(&metadata_path, "meeeeeeeeeeeeeeeeeeeessed up").unwrap();
 
-        match book_dir.list().await.unwrap_err() {
+        match book_dir.list().unwrap_err() {
             BookrabError::InvalidMetadata(err) => {
                 assert_eq!(err.metadata, "meeeeeeeeeeeeeeeeeeeessed up");
                 assert_eq!(err.path, metadata_path.to_string_lossy());
@@ -392,12 +532,12 @@ mod tests {
     }
     macro_rules! test_filter {
         ($name:ident, $include:expr, $exclude: expr, $expected: expr) => {
-            #[actix_web::test]
-            async fn $name() -> Result<(), anyhow::Error> {
+            #[test]
+            fn $name() -> Result<(), anyhow::Error> {
                 let book_dir = root_for_tag_tests();
                 let include = $include;
                 let exclude = $exclude;
-                let books = book_dir.list_by_tags(include, exclude).await.unwrap();
+                let books = book_dir.list_by_tags(include, exclude).unwrap();
 
                 let expected = $expected;
                 assert_eq!(books.len(), expected.len());
@@ -412,6 +552,24 @@ mod tests {
             }
         };
     }
+
+    fn root_for_tag_tests() -> RootBookDir {
+        let book_dir = temp_dir().to_path_buf().join("tag_testing_bookrab");
+        let root = RootBookDir::new(book_dir);
+        if root.path.exists() {
+            return root;
+        }
+        root.create().expect("couldnt create root dir");
+        root.upload("1", "", s(vec!["a", "b", "c", "d"]))
+            .unwrap()
+            .upload("2", "", s(vec!["a", "b", "c"]))
+            .unwrap()
+            .upload("3", "", s(vec!["a", "b"]))
+            .unwrap()
+            .upload("4", "", s(vec!["a"]))
+            .unwrap();
+        root
+    }
     // here we go
     test_filter!(
         filter_include_all,
@@ -423,7 +581,7 @@ mod tests {
             mode: FilterMode::All,
             tags: s(vec![]),
         },
-        HashSet::from(s(vec!["1"]))
+        s(vec!["1"])
     );
     test_filter!(
         filter_include_any,
@@ -435,7 +593,7 @@ mod tests {
             mode: FilterMode::All,
             tags: s(vec![]),
         },
-        HashSet::from(s(vec!["1", "2"]))
+        s(vec!["1", "2"])
     );
     test_filter!(
         filter_exclude_all,
@@ -447,7 +605,7 @@ mod tests {
             mode: FilterMode::All,
             tags: s(vec!["d", "c"]),
         },
-        HashSet::from(s(vec!["2", "3", "4"]))
+        s(vec!["2", "3", "4"])
     );
     test_filter!(
         filter_exclude_any,
@@ -459,7 +617,7 @@ mod tests {
             mode: FilterMode::Any,
             tags: s(vec!["d", "c"]),
         },
-        HashSet::from(s(vec!["3", "4"]))
+        s(vec!["3", "4"])
     );
     test_filter!(
         filter_include_any_exclude_any,
@@ -471,7 +629,7 @@ mod tests {
             mode: FilterMode::Any,
             tags: s(vec!["d", "c"]),
         },
-        HashSet::from(s(vec!["3"]))
+        s(vec!["3"])
     );
     test_filter!(
         filter_include_all_exclude_all,
@@ -483,7 +641,7 @@ mod tests {
             mode: FilterMode::All,
             tags: s(vec!["b", "d"]),
         },
-        HashSet::from(s(vec!["2", "3"]))
+        s(vec!["2", "3"])
     );
     test_filter!(
         filter_include_any_exclude_all,
@@ -495,7 +653,7 @@ mod tests {
             mode: FilterMode::All,
             tags: s(vec!["a", "d"]),
         },
-        HashSet::from(s(vec!["2", "3"]))
+        s(vec!["2", "3"])
     );
     test_filter!(
         filter_include_all_exclude_any,
@@ -507,17 +665,14 @@ mod tests {
             mode: FilterMode::Any,
             tags: s(vec!["a", "d"]),
         },
-        HashSet::from(s(vec![]))
+        s(vec![])
     );
 
-    #[actix_web::test]
-    async fn get_by_title() -> Result<(), anyhow::Error> {
+    #[test]
+    fn get_by_title() -> Result<(), anyhow::Error> {
         let book_dir = create_book_dir();
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
-        let book = book_dir
-            .get_by_title("lusiadas".to_string())
-            .await?
-            .unwrap();
+        let book = book_dir.get_by_title("lusiadas".to_string())?.unwrap();
         assert_eq!(
             book,
             BookListElement {
@@ -527,4 +682,73 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn get_text() -> Result<(), anyhow::Error> {
+        let book_dir = create_book_dir();
+        book_dir.upload("lusiadas", TXT, basic_metadata()).unwrap();
+        let txt = book_dir.get_text("lusiadas".to_string()).unwrap();
+        assert_eq!(txt, TXT);
+        Ok(())
+    }
+
+    macro_rules! test_search {
+        ($name:ident, $searcher: expr, $matcher: expr, $expected: expr) => {
+            #[test]
+            fn $name() -> Result<(), anyhow::Error> {
+                let book_dir = create_book_dir();
+                book_dir.upload("lusiadas", TXT, basic_metadata()).unwrap();
+                let result = book_dir
+                    .search(String::from("lusiadas"), $searcher, $matcher)
+                    .unwrap();
+                assert_eq!(result.title, "lusiadas");
+                assert_eq!(result.results, $expected);
+                Ok(())
+            }
+        };
+    }
+    test_search!(
+        basic_search,
+        SearcherBuilder::new().build(),
+        RegexMatcher::new(r"\bpadeceu\b").unwrap(),
+        vec!["Que padeceu desonra e vitupério,\n"]
+    );
+
+    test_search!(
+        search_with_after_context,
+        SearcherBuilder::new().after_context(2).build(),
+        RegexMatcherBuilder::new()
+            .case_insensitive(true)
+            .build(r"\bpor\w*?")
+            .unwrap(),
+        vec![
+            "Por subir os mortais da Terra ao Céu.\n\nDeste Deus-Homem, alto e infinito,\n",
+            "Como amigo as verás; porque eu me obrigo,\nQue nunca as queiras ver como inimigo.\n\n"
+        ]
+    );
+    test_search!(
+        search_with_before_context,
+        SearcherBuilder::new().before_context(2).build(),
+        RegexMatcherBuilder::new()
+            .case_insensitive(true)
+            .build(r"\bpor\w*?")
+            .unwrap(),
+            vec![
+                "Sofrendo morte injusta e insofríbil,\nE que do Céu à Terra, enfim desceu,\nPor subir os mortais da Terra ao Céu.\n", 
+                "Se as armas queres ver, como tens dito,\nCumprido esse desejo te seria;\nComo amigo as verás; porque eu me obrigo,\n"
+            ]
+    );
+    test_search!(
+        search_with_both_contexts,
+        SearcherBuilder::new().before_context(1).after_context(1).build(),
+        RegexMatcherBuilder::new()
+            .case_insensitive(true)
+            .build(r"\bpor\w*?")
+            .unwrap(),
+            vec![
+                "E que do Céu à Terra, enfim desceu,\nPor subir os mortais da Terra ao Céu.\n\n", 
+                "Cumprido esse desejo te seria;\nComo amigo as verás; porque eu me obrigo,\nQue nunca as queiras ver como inimigo.\n"
+            ]
+
+    );
 }
