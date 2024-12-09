@@ -1,15 +1,15 @@
-use crate::{errors::CouldntReadFile, errors::NotUnicode, views::books::RootBookDir};
+use crate::{
+    books::RootBookDir,
+    errors::{BadRequestError, CouldntReadFile, InternalServerErrors, NotUnicode},
+};
 use std::{collections::HashSet, io::Read, path::PathBuf};
 
 use actix_multipart::form::{json::Json, tempfile::TempFile, MultipartForm};
 use actix_web::{post, HttpResponse, Responder};
 use log::error;
-use utoipa::{ToResponse, ToSchema};
+use utoipa::ToSchema;
 
-use crate::{
-    config::get_config,
-    errors::{CouldntCreateDir, CouldntSaveFile, CouldntWriteFile, ShouldBeTextPlain},
-};
+use crate::{config::get_config, errors::ShouldBeTextPlain};
 
 /// Represents a form for book uploading.
 /// The books currently have to be .txt files.
@@ -22,24 +22,14 @@ struct BookForm {
     #[schema(value_type = Vec<String>)]
     tags: Json<Vec<String>>,
 }
-/// Represents internal server errors that could be returned from the
-/// book uploading endpoint.
-#[derive(ToSchema, ToResponse)]
-#[allow(dead_code)]
-enum UploadError {
-    CouldntCreateDir(#[content("application/json")] CouldntCreateDir),
-    CouldntWriteMetadata(#[content("application/json")] CouldntWriteFile),
-    CouldntSaveFile(#[content("application/json")] CouldntSaveFile),
-    NotUnicode(#[content("application/json")] NotUnicode),
-}
 
 /// Uploads a book to be searched later.
 #[utoipa::path(
     request_body(content_type = "multipart/form-data", content = BookForm),
     responses (
         (status = 200, description = "Success (without response body)"),
-        (status = 400, content((ShouldBeTextPlain = "application/json"))),
-        (status = 500, content((UploadError)))
+        (status = 400, content((BadRequestError))),
+        (status = 500, content((InternalServerErrors))),
     )
 )]
 #[post("/upload")]

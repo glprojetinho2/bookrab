@@ -2,11 +2,12 @@ use anyhow::anyhow;
 use log::error;
 use serde::Serialize;
 use std::path::PathBuf;
+use utoipa::{openapi::content, ToResponse, ToSchema};
 
 use actix_web::{
     body::BoxBody,
     http::{header::ContentType, StatusCode},
-    HttpResponse,
+    HttpResponse, Responder,
 };
 use serde_json::json;
 use thiserror::Error;
@@ -39,6 +40,13 @@ macro_rules! impl_responder {
                     .status($status)
                     .content_type(ContentType::json())
                     .body(body.to_string())
+            }
+        }
+
+        #[allow(clippy::from_over_into)]
+        impl Into<HttpResponse> for $struct {
+            fn into(self) -> HttpResponse {
+                self.to_res()
             }
         }
     };
@@ -436,4 +444,33 @@ impl From<grep_regex::Error> for BookrabError {
         let bookrab_error = RegexProblem::new(err.clone());
         BookrabError::RegexProblem(bookrab_error, anyhow!(err))
     }
+}
+
+impl Into<HttpResponse> for BookrabError {
+    fn into(self) -> HttpResponse {
+        self.to_res()
+    }
+}
+
+#[derive(ToSchema, ToResponse)]
+#[allow(dead_code)]
+pub enum InternalServerErrors {
+    CouldntSaveFile(#[content("application/json")] CouldntSaveFile),
+    CouldntCreateDir(#[content("application/json")] CouldntCreateDir),
+    CouldntWriteFile(#[content("application/json")] CouldntWriteFile),
+    MessedUpBookFolder(#[content("application/json")] MessedUpBookFolder),
+    CouldntReadChild(#[content("application/json")] CouldntReadChild),
+    InvalidMetadata(#[content("application/json")] InvalidMetadata),
+    CouldntReadFile(#[content("application/json")] CouldntReadFile),
+    CouldntReadDir(#[content("application/json")] CouldntReadDir),
+    GrepSearchError(#[content("application/json")] GrepSearchError),
+}
+
+#[derive(ToSchema, ToResponse)]
+#[allow(dead_code)]
+pub enum BadRequestError {
+    ShouldBeTextPlain(#[content("application/json")] ShouldBeTextPlain),
+    NotUnicode(#[content("application/json")] NotUnicode),
+    InexistentBook(#[content("application/json")] InexistentBook),
+    RegexProblem(#[content("application/json")] RegexProblem),
 }

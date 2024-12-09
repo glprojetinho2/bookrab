@@ -1,6 +1,5 @@
-use super::BookListElement;
-use super::RootBookDir;
 use crate::{
+    books::{BookListElement, RootBookDir},
     config::{get_config, BookrabConfig},
     errors::{CouldntReadChild, CouldntReadFile, InvalidMetadata},
 };

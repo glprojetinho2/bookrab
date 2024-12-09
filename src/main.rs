@@ -1,9 +1,10 @@
 use actix_files::Files;
 use actix_web::dev::Service;
+use books::FilterMode;
 use futures_util::FutureExt;
 use std::fs;
 use utoipa_redoc::{Redoc, Servable};
-use utoipa_swagger_ui::SwaggerUi;
+mod books;
 pub mod config;
 pub mod errors;
 mod views;
@@ -23,7 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[derive(OpenApi)]
     #[openapi(
         info(license(name = "MIT", identifier = "MIT")),
-        modifiers(&ApiDocInfo)
+        modifiers(&ApiDocInfo),
+        components(schemas(FilterMode))
     )]
     struct ApiDoc;
     struct ApiDocInfo;
