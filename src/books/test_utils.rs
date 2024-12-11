@@ -7,7 +7,7 @@ use super::RootBookDir;
 pub const LUSIADAS1: &str = "A lei tenho daquele, a cujo império
 Obedece o visíbil e ínvisíbil
 Aquele que criou todo o Hemisfério,
-Tudo o que sente, o todo o insensíbil;
+Tudo o que sente, e todo o insensíbil;
 Que padeceu desonra e vitupério,
 Sofrendo morte injusta e insofríbil,
 E que do Céu à Terra, enfim desceu,

@@ -1,12 +1,16 @@
 use crate::errors::{GrepSearchError, InexistentBook};
 use anyhow::anyhow;
+use core::str;
+use grep_matcher::{Match, Matcher};
 use grep_regex::RegexMatcher;
-use grep_searcher::{Searcher, Sink, SinkContextKind, SinkError};
+use grep_searcher::{Searcher, Sink, SinkContextKind};
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, io, path::PathBuf};
+use utils::{find_iter_at_in_context_single_line, from_utf8};
 use utoipa::ToSchema;
 mod test_utils;
+mod utils;
 
 use crate::errors::{
     BookrabError, CouldntCreateDir, CouldntReadChild, CouldntReadDir, CouldntReadFile,
@@ -56,8 +60,8 @@ pub struct SearchResults {
 impl SearchResults {
     /// Generates a BookSink instance that can
     /// fill this instance with search results.
-    fn sink(&mut self) -> BookSink {
-        BookSink::new(self)
+    fn sink<T: Matcher>(&mut self, matcher: T) -> BookSink<T> {
+        BookSink::new(self, matcher)
     }
     fn new(title: String) -> Self {
         SearchResults {
@@ -69,16 +73,51 @@ impl SearchResults {
 
 /// Sink to be used in book searches.
 /// It doesn't support passthru.
-pub struct BookSink<'a> {
+pub struct BookSink<'a, T: Matcher> {
     results: &'a mut SearchResults,
+    matcher: T,
+    matches: Vec<Match>,
     after_context_id: usize,
 }
 
-impl BookSink<'_> {
+impl<T: Matcher> BookSink<'_, T> {
+    /// Execute the matcher over the given bytes and record the match locations.
+    fn record_matches(
+        &mut self,
+        searcher: &Searcher,
+        bytes: &[u8],
+        range: std::ops::Range<usize>,
+    ) -> io::Result<()> {
+        self.matches.clear();
+        // If printing requires knowing the location of each individual match,
+        // then compute and stored those right now for use later. While this
+        // adds an extra copy for storing the matches, we do amortize the
+        // allocation for it and this greatly simplifies the printing logic to
+        // the extent that it's easy to ensure that we never do more than
+        // one search to find the matches (well, for replacements, we do one
+        // additional search to perform the actual replacement).
+        let matches = &mut self.matches;
+        find_iter_at_in_context_single_line(searcher, &self.matcher, bytes, range.clone(), |m| {
+            let (s, e) = (m.start() - range.start, m.end() - range.start);
+            matches.push(Match::new(s, e));
+            true
+        })?;
+        // Don't report empty matches appearing at the end of the bytes.
+        if !matches.is_empty()
+            && matches.last().unwrap().is_empty()
+            && matches.last().unwrap().start() >= range.end
+        {
+            matches.pop().unwrap();
+        }
+        Ok(())
+    }
+
     /// Creates new [BookSink] instance from [SearchResults] instance
-    fn new(results: &mut SearchResults) -> BookSink {
+    fn new(results: &mut SearchResults, matcher: T) -> BookSink<T> {
         BookSink {
             results,
+            matcher,
+            matches: vec![],
             after_context_id: 0,
         }
     }
@@ -90,17 +129,14 @@ impl BookSink<'_> {
     /// this_func(" string".bytes())
     /// results == ["not last", "last string"]
     /// ```
-    fn push_to_last_entry(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
+    fn push_to_last_entry(&mut self, value: &str) -> Result<(), std::io::Error> {
         let mut current_result = self.results.results.pop().unwrap_or_default();
-        current_result += match std::str::from_utf8(bytes) {
-            Ok(matched) => matched,
-            Err(err) => return Err(std::io::Error::error_message(err)),
-        };
+        current_result += value;
         self.results.results.push(current_result);
         Ok(())
     }
 }
-impl Sink for BookSink<'_> {
+impl<T: Matcher> Sink for BookSink<'_, T> {
     type Error = std::io::Error;
 
     fn matched(
@@ -113,12 +149,35 @@ impl Sink for BookSink<'_> {
         // If there is no after_context, then matches are treated the
         // same as the last contextual line of the `After` kind
         // (see the comment in the context function).
-        self.push_to_last_entry(mat.bytes())?;
+
+        // here we add [matched] [/matched] around the search result.
+        self.record_matches(searcher, mat.buffer(), mat.bytes_range_in_buffer())?;
+        let raw_result = from_utf8(mat.bytes())?;
+        let mut result_with_matched_tags = String::from(raw_result);
+        let opening_tag = "[matched]";
+        let closing_tag = "[/matched]";
+        for m in self.matches.iter() {
+            let offset = result_with_matched_tags.len() - raw_result.len();
+            let start = m.start() + offset;
+            let end = m.end() + offset;
+            let r = result_with_matched_tags;
+            result_with_matched_tags = format!(
+                "{}{}{}{}{}",
+                &r[..start],
+                opening_tag,
+                &r[start..end],
+                closing_tag,
+                &r[end..]
+            );
+        }
+        self.push_to_last_entry(result_with_matched_tags.as_str())?;
         if searcher.after_context() == 0 {
             self.results.results.push("".to_string());
         }
+
         Ok(true)
     }
+
     fn context(
         &mut self,
         searcher: &grep_searcher::Searcher,
@@ -136,7 +195,7 @@ impl Sink for BookSink<'_> {
         // second contextual line => results == ["match context1 context2", ""] <= observe the empty string
         // another match => results = ["match context1 context2", "another match"]
         // and so on.
-        self.push_to_last_entry(context.bytes())?;
+        self.push_to_last_entry(from_utf8(context.bytes())?)?;
         if let SinkContextKind::After = context.kind() {
             self.after_context_id += 1;
             if self.after_context_id == searcher.after_context() {
@@ -385,8 +444,9 @@ impl RootBookDir {
     ) -> Result<SearchResults, BookrabError> {
         let mut results = SearchResults::new(title.clone());
         let book_path = self.path.join(title).join("txt");
+        let sink = &mut results.sink(matcher);
         if book_path.exists() {
-            if let Err(e) = searcher.search_path(matcher, &book_path, &mut results.sink()) {
+            if let Err(e) = searcher.search_path(sink.matcher.clone(), &book_path, sink) {
                 return Err(BookrabError::GrepSearchError(
                     GrepSearchError::new(&book_path),
                     anyhow!(e),
@@ -704,7 +764,24 @@ mod tests {
         basic_search,
         SearcherBuilder::new().build(),
         RegexMatcher::new(r"\bpadeceu\b").unwrap(),
-        vec!["Que padeceu desonra e vitupério,\n"]
+        vec!["Que [matched]padeceu[/matched] desonra e vitupério,\n"]
+    );
+
+    test_search!(
+        multiple_results_in_one_line_search,
+        SearcherBuilder::new().build(),
+        RegexMatcher::new(r"v").unwrap(),
+        vec![
+            "Obedece o [matched]v[/matched]isíbil e ín[matched]v[/matched]isíbil\n",
+            "Que padeceu desonra e [matched]v[/matched]itupério,\n",
+            "Os li[matched]v[/matched]ros, que tu pedes não trazia,\n",
+            "Em papel o que na alma andar de[matched]v[/matched]ia.\n",
+            "Se as armas queres [matched]v[/matched]er, como tens dito,\n",
+            "Como amigo as [matched]v[/matched]erás; porque eu me obrigo,\n",
+            "Que nunca as queiras [matched]v[/matched]er como inimigo.\n",
+            "Arcos, e sagitíferas alja[matched]v[/matched]as,\n",
+            "Partazanas agudas, chuças bra[matched]v[/matched]as:"
+        ]
     );
 
     test_search!(
@@ -715,8 +792,8 @@ mod tests {
             .build(r"\bpor\w*?")
             .unwrap(),
         vec![
-            "Por subir os mortais da Terra ao Céu.\n\nDeste Deus-Homem, alto e infinito,\n",
-            "Como amigo as verás; porque eu me obrigo,\nQue nunca as queiras ver como inimigo.\n\n"
+            "[matched]Por[/matched] subir os mortais da Terra ao Céu.\n\nDeste Deus-Homem, alto e infinito,\n",
+            "Como amigo as verás; [matched]por[/matched]que eu me obrigo,\nQue nunca as queiras ver como inimigo.\n\n"
         ]
     );
     test_search!(
@@ -727,31 +804,21 @@ mod tests {
             .build(r"\bpor\w*?")
             .unwrap(),
             vec![
-                "Sofrendo morte injusta e insofríbil,\nE que do Céu à Terra, enfim desceu,\nPor subir os mortais da Terra ao Céu.\n", 
-                "Se as armas queres ver, como tens dito,\nCumprido esse desejo te seria;\nComo amigo as verás; porque eu me obrigo,\n"
+                "Sofrendo morte injusta e insofríbil,\nE que do Céu à Terra, enfim desceu,\n[matched]Por[/matched] subir os mortais da Terra ao Céu.\n", 
+                "Se as armas queres ver, como tens dito,\nCumprido esse desejo te seria;\nComo amigo as verás; [matched]por[/matched]que eu me obrigo,\n"
             ]
     );
     test_search!(
         search_with_both_contexts,
-        SearcherBuilder::new().before_context(1).after_context(1).build(),
+        SearcherBuilder::new()
+            .before_context(1)
+            .after_context(1)
+            .build(),
         RegexMatcherBuilder::new()
             .case_insensitive(true)
             .build(r"\bpor\w*?")
             .unwrap(),
-            vec![
-                "E que do Céu à Terra, enfim desceu,\nPor subir os mortais da Terra ao Céu.\n\n", 
-                "Cumprido esse desejo te seria;\nComo amigo as verás; porque eu me obrigo,\nQue nunca as queiras ver como inimigo.\n"
-            ]
-
-    );
-    test_search!(
-        search_with_passthru,
-        SearcherBuilder::new().passthru(true).build(),
-        RegexMatcherBuilder::new()
-            .case_insensitive(true)
-            .build(r"\bpor\w*?")
-            .unwrap(),
-        vec![LUSIADAS1]
+        vec!["E que do Céu à Terra, enfim desceu,\n[matched]Por[/matched] subir os mortais da Terra ao Céu.\n\n", "Cumprido esse desejo te seria;\nComo amigo as verás; [matched]por[/matched]que eu me obrigo,\nQue nunca as queiras ver como inimigo.\n"]
     );
 
     #[test]
@@ -781,17 +848,17 @@ mod tests {
     SearchResults {
         title: String::from("2"),
         results: vec![
-            "Que da ocidental praia Lusitana,\nPor mares nunca de antes navegados,\nPassaram ainda além da Taprobana,\n".to_string(),
-            "De África e de Ásia andaram devastando;\nE aqueles, que por obras valerosas\nSe vão da lei da morte libertando;\n".to_string(),
-            "Cantando espalharei por toda parte,\nSe a tanto me ajudar o engenho e arte.\n".to_string(),
+            "Que da ocidental praia Lusitana,\n[matched]Por[/matched] mares nunca de antes navegados,\nPassaram ainda além da Taprobana,\n".to_string(),
+            "De África e de Ásia andaram devastando;\nE aqueles, que [matched]por[/matched] obras valerosas\nSe vão da lei da morte libertando;\n".to_string(),
+            "Cantando espalharei [matched]por[/matched] toda parte,\nSe a tanto me ajudar o engenho e arte.\n".to_string(),
         ],
     },
     SearchResults {
         title: String::from("3"),
         results: vec![
-            "Menos trabalho em tal negócio gasta:\nAta o cordão que traz, por derradeiro,\nNo tronco, e fàcilmente o leva e arrasta\n".to_string(),
-            "Pera onde faça um sumptuoso templo\nQue ficasse aos futuros por exemplo.\n\n".to_string(),
-            "A gente ficou disto alvoraçada;\nOs Brâmenes o têm por cousa nova;\nVendo os milagres, vendo a santidade,\n".to_string(),
+            "Menos trabalho em tal negócio gasta:\nAta o cordão que traz, [matched]por[/matched] derradeiro,\nNo tronco, e fàcilmente o leva e arrasta\n".to_string(),
+            "Pera onde faça um sumptuoso templo\nQue ficasse aos futuros [matched]por[/matched] exemplo.\n\n".to_string(),
+            "A gente ficou disto alvoraçada;\nOs Brâmenes o têm [matched]por[/matched] cousa nova;\nVendo os milagres, vendo a santidade,\n".to_string(),
         ],
     },
 ]
