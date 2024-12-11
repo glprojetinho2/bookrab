@@ -8,9 +8,12 @@ pub struct BookrabConfig {
 }
 impl std::default::Default for BookrabConfig {
     fn default() -> Self {
-        Self {
-            book_path: PathBuf::from(".books/"),
-        }
+        let base = directories::BaseDirs::new();
+        let mut path = PathBuf::from(".books/");
+        if base.is_some() {
+            path = base.unwrap().data_local_dir().to_path_buf().join("bookrab");
+        };
+        Self { book_path: path }
     }
 }
 

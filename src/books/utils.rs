@@ -50,6 +50,6 @@ where
 pub(crate) fn from_utf8(bytes: &[u8]) -> Result<&str, std::io::Error> {
     match std::str::from_utf8(bytes) {
         Ok(matched) => Ok(matched),
-        Err(err) => return Err(std::io::Error::error_message(err)),
+        Err(err) => Err(std::io::Error::error_message(err)),
     }
 }
