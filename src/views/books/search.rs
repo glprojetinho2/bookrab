@@ -6,7 +6,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::{
     books::{Exclude, FilterMode, Include, RootBookDir, SearchResults},
-    config::get_config,
+    config::{ensure_config_works, ensure_confy_works},
     errors::{BadRequestError, InternalServerErrors, RegexProblem},
 };
 
@@ -36,7 +36,7 @@ struct SearchForm {
 )]
 #[get("/search")]
 pub async fn search(form: web::Query<SearchForm>) -> HttpResponse {
-    let config = get_config();
+    let config = ensure_confy_works();
     let searcher = SearcherBuilder::new()
         .after_context(form.after_context.unwrap_or_default())
         .before_context(form.before_context.unwrap_or_default())
@@ -49,7 +49,7 @@ pub async fn search(form: web::Query<SearchForm>) -> HttpResponse {
         Ok(v) => v,
         Err(e) => return RegexProblem::new(e).into(),
     };
-    let root = RootBookDir::new(config.book_path);
+    let root = RootBookDir::new(config);
     //TODO: maybe there is a way to remove those .clone()'s?
     let include = Include {
         mode: form.include_mode.clone().unwrap_or_default(),

@@ -1,25 +1,29 @@
-use crate::errors::{GrepSearchError, InexistentBook};
+mod history;
+mod test_utils;
+mod utils;
+use crate::{
+    config::BookrabConfig,
+    errors::{GrepSearchError, InexistentBook},
+};
 use anyhow::anyhow;
 use core::str;
 use grep_matcher::{Match, Matcher};
 use grep_regex::RegexMatcher;
 use grep_searcher::{Searcher, Sink, SinkContextKind};
+use history::SearchHistory;
 use log::error;
-use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fs, io, path::PathBuf};
+use std::{collections::HashSet, fs, io};
 use utils::{find_iter_at_in_context_single_line, from_utf8};
 use utoipa::ToSchema;
-mod test_utils;
-mod utils;
 
 use crate::errors::{
     BookrabError, CouldntCreateDir, CouldntReadChild, CouldntReadDir, CouldntReadFile,
-    CouldntWriteFile, InvalidMetadata,
+    CouldntWriteFile, InvalidTags,
 };
 
 /// Represents elements returned by the listing
 /// route.
-#[derive(Debug, Deserialize, Serialize, ToSchema, PartialEq)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, ToSchema, PartialEq)]
 pub struct BookListElement {
     /// Book title
     title: String,
@@ -28,7 +32,7 @@ pub struct BookListElement {
 }
 
 /// Manages the way that books will be filtered by tags.
-#[derive(Clone, Debug, ToSchema, Default, Deserialize)]
+#[derive(Clone, Debug, ToSchema, Default, serde::Deserialize)]
 pub enum FilterMode {
     /// Grabs books that have all of the tags.
     All,
@@ -51,7 +55,7 @@ pub struct Include {
 }
 
 /// Associates search results with the title of a book.
-#[derive(Clone, Debug, PartialEq, ToSchema, Serialize)]
+#[derive(Clone, Debug, PartialEq, ToSchema, serde::Serialize)]
 pub struct SearchResults {
     title: String,
     results: Vec<String>,
@@ -238,24 +242,15 @@ impl<T: Matcher> Sink for BookSink<'_, T> {
 /// │  ├─ txt
 /// │  ├─ tags.json
 /// ```
+#[derive(Debug)]
 pub struct RootBookDir {
-    path: PathBuf,
+    config: BookrabConfig,
 }
 
 impl RootBookDir {
-    const INFO_PATH: &str = "tags.json";
-    pub fn new(path: PathBuf) -> Self {
-        RootBookDir { path }
-    }
-    /// Creates folder to store books.
-    /// It ignores `std::io::ErrorKind::AlreadyExists`
-    pub fn create(&self) -> io::Result<()> {
-        if let Err(e) = fs::create_dir_all(&self.path) {
-            if e.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(e);
-            }
-        }
-        Ok(())
+    const INFO_PATH: &'static str = "tags.json";
+    pub fn new(config: BookrabConfig) -> RootBookDir {
+        RootBookDir { config }
     }
 
     /// Gets book according to its title.
@@ -320,12 +315,12 @@ impl RootBookDir {
 
     /// Lists all books in the form of [BookListElement]
     pub fn list(&self) -> Result<Vec<BookListElement>, BookrabError> {
-        let books_dir = match fs::read_dir(self.path.clone()) {
+        let books_dir = match fs::read_dir(self.config.book_path.clone()) {
             Ok(v) => v,
             Err(e) => {
                 error!("{e:#?}");
                 return Err(BookrabError::CouldntReadDir(
-                    CouldntReadDir::new(&self.path),
+                    CouldntReadDir::new(&self.config.book_path),
                     anyhow!(e),
                 ));
             }
@@ -339,7 +334,8 @@ impl RootBookDir {
                         error!("{:#?}", e);
                         Err(BookrabError::CouldntReadChild(
                             CouldntReadChild::new(
-                                self.path
+                                self.config
+                                    .book_path
                                     .to_str()
                                     .unwrap_or("path is not even valid unicode"),
                             ),
@@ -374,7 +370,7 @@ impl RootBookDir {
                 Err(e) => {
                     return {
                         error!("{:#?}", e);
-                        Err(BookrabError::InvalidMetadata(InvalidMetadata::new(
+                        Err(BookrabError::InvalidTags(InvalidTags::new(
                             tags_contents.as_str(),
                             &tags_path,
                         )))
@@ -401,7 +397,7 @@ impl RootBookDir {
         tags: HashSet<String>,
     ) -> Result<&Self, BookrabError> {
         // create book directory if it doesn't exist
-        let book_path = &self.path.join(title);
+        let book_path = &self.config.book_path.join(title);
         if let Err(e) = fs::create_dir_all(book_path) {
             if e.kind() != std::io::ErrorKind::AlreadyExists {
                 return Err(BookrabError::CouldntCreateDir(
@@ -421,7 +417,7 @@ impl RootBookDir {
 
         // write metadata
         let tags_str =
-            serde_json::to_string(&tags).expect("BookMetadata could not be converted to string");
+            serde_json::to_string(&tags).expect("BookTags could not be converted to string");
         let tags_path = book_path.join(Self::INFO_PATH);
         if let Err(e) = fs::write(&tags_path, tags_str) {
             return Err(BookrabError::CouldntWriteFile(
@@ -443,7 +439,7 @@ impl RootBookDir {
         matcher: RegexMatcher,
     ) -> Result<SearchResults, BookrabError> {
         let mut results = SearchResults::new(title.clone());
-        let book_path = self.path.join(title).join("txt");
+        let book_path = self.config.book_path.join(title).join("txt");
         let sink = &mut results.sink(matcher);
         if book_path.exists() {
             if let Err(e) = searcher.search_path(sink.matcher.clone(), &book_path, sink) {
@@ -457,7 +453,8 @@ impl RootBookDir {
                 &book_path,
             )));
         }
-        Ok(results)
+        let res = SearchHistory::new(self.config.clone()).register_history(vec![results])?;
+        Ok(res.first().unwrap().to_owned())
     }
 
     /// Searches stuff in all books that respect some
@@ -476,13 +473,15 @@ impl RootBookDir {
             let single_search = self.search(title, searcher.clone(), matcher.clone())?;
             search_results.push(single_search);
         }
-        Ok(search_results)
+        SearchHistory::new(self.config.clone()).register_history(search_results)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::books::RootBookDir;
+    use chrono::Datelike;
+    use chrono::Utc;
     use grep_regex::RegexMatcherBuilder;
     use grep_searcher::SearcherBuilder;
     use test_utils::{basic_metadata, create_book_dir, root_for_tag_tests, s, LUSIADAS1};
@@ -497,11 +496,16 @@ mod tests {
             .upload("lusiadas", expected_text, basic_metadata())
             .unwrap();
 
-        let txt = fs::read_to_string(book_dir.path.join("lusiadas").join("txt"))
+        let txt = fs::read_to_string(book_dir.config.book_path.join("lusiadas").join("txt"))
             .expect("couldnt read txt (file not created?)");
-        let tags_txt =
-            fs::read_to_string(book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH))
-                .expect("couldnt read info (file not created?)");
+        let tags_txt = fs::read_to_string(
+            book_dir
+                .config
+                .book_path
+                .join("lusiadas")
+                .join(RootBookDir::INFO_PATH),
+        )
+        .expect("couldnt read info (file not created?)");
         let tags: HashSet<String> = serde_json::from_str(&tags_txt).unwrap();
         assert_eq!(txt, expected_text);
         assert_eq!(tags, basic_metadata());
@@ -522,11 +526,16 @@ mod tests {
             .upload("lusiadas", expected_text, basic_metadata())
             .unwrap();
 
-        let txt = fs::read_to_string(book_dir.path.join("lusiadas").join("txt"))
+        let txt = fs::read_to_string(book_dir.config.book_path.join("lusiadas").join("txt"))
             .expect("couldnt read txt (file not created?)");
-        let tags_txt =
-            fs::read_to_string(book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH))
-                .expect("couldnt read info (file not created?)");
+        let tags_txt = fs::read_to_string(
+            book_dir
+                .config
+                .book_path
+                .join("lusiadas")
+                .join(RootBookDir::INFO_PATH),
+        )
+        .expect("couldnt read info (file not created?)");
         let tags: HashSet<String> = serde_json::from_str(&tags_txt).unwrap();
         assert_eq!(txt, expected_text);
         assert_eq!(tags, basic_metadata());
@@ -577,12 +586,16 @@ mod tests {
     fn list_invalid_metadata() -> Result<(), anyhow::Error> {
         let book_dir = create_book_dir();
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
-        let metadata_path = book_dir.path.join("lusiadas").join(RootBookDir::INFO_PATH);
+        let metadata_path = book_dir
+            .config
+            .book_path
+            .join("lusiadas")
+            .join(RootBookDir::INFO_PATH);
         fs::write(&metadata_path, "meeeeeeeeeeeeeeeeeeeessed up").unwrap();
 
         match book_dir.list().unwrap_err() {
-            BookrabError::InvalidMetadata(err) => {
-                assert_eq!(err.metadata, "meeeeeeeeeeeeeeeeeeeessed up");
+            BookrabError::InvalidTags(err) => {
+                assert_eq!(err.tags, "meeeeeeeeeeeeeeeeeeeessed up");
                 assert_eq!(err.path, metadata_path.to_string_lossy());
             }
             _ => return Err(anyhow!("isnt invalid metadata")),
@@ -591,7 +604,7 @@ mod tests {
     }
     macro_rules! test_filter {
         ($include:expr, $exclude: expr, $expected: expr) => {{
-            let book_dir = root_for_tag_tests();
+            let book_dir = dbg!(root_for_tag_tests());
             let books = book_dir.list_by_tags($include, $exclude).unwrap();
 
             let expected = $expected;
@@ -744,7 +757,7 @@ mod tests {
     }
 
     macro_rules! test_search {
-        ($name:ident, $searcher: expr, $matcher: expr, $expected: expr) => {
+        ($name:ident, $searcher: expr, $matcher: expr, $expected_results: expr) => {
             #[test]
             fn $name() -> Result<(), anyhow::Error> {
                 let book_dir = create_book_dir();
@@ -755,7 +768,12 @@ mod tests {
                     .search(String::from("lusiadas"), $searcher, $matcher)
                     .unwrap();
                 assert_eq!(result.title, "lusiadas");
-                assert_eq!(result.results, $expected);
+                assert_eq!(result.results, $expected_results);
+                let history_str = fs::read_to_string(book_dir.config.history_path).unwrap();
+                let now = Utc::now();
+                assert!(history_str.contains("lusiadas"));
+                assert!(history_str.contains("[matched]"));
+                assert!(history_str.contains(now.year().to_string().as_str()));
                 Ok(())
             }
         };

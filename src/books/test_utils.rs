@@ -1,6 +1,8 @@
-use std::{collections::HashSet, env::temp_dir};
+use std::{collections::HashSet, env::temp_dir, fs};
 
 use rand::{distributions::Alphanumeric, Rng};
+
+use crate::config::{ensure_config_works, BookrabConfig};
 
 use super::RootBookDir;
 
@@ -118,20 +120,33 @@ pub fn create_book_dir() -> RootBookDir {
         .map(char::from)
         .collect();
 
-    let book_dir = temp_dir()
-        .to_path_buf()
-        .join("bookrab-test".to_string() + &random_name);
-    let root = RootBookDir::new(book_dir);
-    root.create().expect("couldnt create root dir");
-    root
+    let temp = temp_dir().to_path_buf();
+    let book_dir = temp.join("bookrab-test-".to_string() + &random_name);
+    let history_file = temp.join("bookrab-history-".to_string() + &random_name);
+
+    RootBookDir::new(ensure_config_works(BookrabConfig {
+        history_path: history_file,
+        book_path: book_dir,
+    }))
 }
 pub fn root_for_tag_tests() -> RootBookDir {
-    let book_dir = temp_dir().to_path_buf().join("tag_testing_bookrab");
-    let root = RootBookDir::new(book_dir);
-    if root.path.exists() {
-        return root;
+    let random_name: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(15)
+        .map(char::from)
+        .collect();
+    let temp = temp_dir().to_path_buf();
+    let book_dir = temp.join("tag_testing_bookrab");
+    let history_file = temp.join("bookrab-history".to_string() + &random_name);
+
+    let config = BookrabConfig {
+        history_path: history_file,
+        book_path: book_dir,
+    };
+    if config.book_path.exists() {
+        return RootBookDir::new(ensure_config_works(config));
     }
-    root.create().expect("couldnt create root dir");
+    let root = RootBookDir::new(ensure_config_works(config));
     root.upload("1", LUSIADAS1, s(vec!["a", "b", "c", "d"]))
         .unwrap()
         .upload("2", LUSIADAS2, s(vec!["a", "b", "c"]))

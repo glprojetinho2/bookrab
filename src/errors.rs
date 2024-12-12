@@ -14,16 +14,17 @@ use thiserror::Error;
 pub const E0001_MSG: &str = "E0001: could not save file permanently.";
 pub const E0002_MSG: &str = "E0002: could not create directory.";
 pub const E0003_MSG: &str = "E0003: file should have 'text/plain' content type.";
-pub const E0004_MSG: &str = "E0004: could not write metadata.";
+pub const E0004_MSG: &str = "E0004: could not write tags.";
 pub const E0005_MSG: &str = "E0005: one of your book folders is messed up.";
 pub const E0006_MSG: &str = "E0006: couldnt read child of your book folder.";
-pub const E0007_MSG: &str = "E0007: invalid metadata.";
+pub const E0007_MSG: &str = "E0007: invalid tags.";
 pub const E0008_MSG: &str = "E0008: couldnt read file.";
 pub const E0009_MSG: &str = "E0009: couldnt read dir.";
 pub const E0010_MSG: &str = "E0010: not valid unicode.";
 pub const E0011_MSG: &str = "E0011: book doesnt exist.";
 pub const E0012_MSG: &str = "E0012: problematic regex pattern.";
 pub const E0013_MSG: &str = "E0013: couldn't search file (even though it exists).";
+pub const E0014_MSG: &str = "E0014: invalid history entry.";
 
 macro_rules! impl_responder {
     ($struct: ident, $status: expr, $msg: expr) => {
@@ -205,22 +206,22 @@ impl_responder!(
 );
 
 /// Responds with [`E0007_MSG`]
-/// Invalid metadata inside book folder.
+/// Invalid tags inside book folder.
 #[derive(
     serde::Serialize, serde::Deserialize, utoipa::ToSchema, utoipa::ToResponse, Debug, PartialEq,
 )]
-pub struct InvalidMetadata {
+pub struct InvalidTags {
     #[schema(default = json!(E0007_MSG))]
     pub error: String,
-    pub metadata: String,
+    pub tags: String,
     pub path: String,
 }
 
-impl InvalidMetadata {
-    pub fn new(metadata: &str, path: &PathBuf) -> Self {
+impl InvalidTags {
+    pub fn new(tags: &str, path: &PathBuf) -> Self {
         Self {
             error: E0007_MSG.to_string(),
-            metadata: metadata.to_string(),
+            tags: tags.to_string(),
             path: path
                 .to_str()
                 .expect("path is not valid unicode")
@@ -229,11 +230,7 @@ impl InvalidMetadata {
     }
 }
 
-impl_responder!(
-    InvalidMetadata,
-    StatusCode::INTERNAL_SERVER_ERROR,
-    E0007_MSG
-);
+impl_responder!(InvalidTags, StatusCode::INTERNAL_SERVER_ERROR, E0007_MSG);
 
 /// Responds with [`E0008_MSG`]
 /// Couldnt read folder inside parent.
@@ -362,6 +359,33 @@ impl_responder!(
     StatusCode::INTERNAL_SERVER_ERROR,
     E0013_MSG
 );
+
+/// Responds with [`E0014_MSG`]
+/// Invalid history inside book folder.
+#[derive(
+    serde::Serialize, serde::Deserialize, utoipa::ToSchema, utoipa::ToResponse, Debug, PartialEq,
+)]
+pub struct InvalidHistory {
+    #[schema(default = json!(E0014_MSG))]
+    pub error: String,
+    pub history: String,
+    pub path: String,
+}
+
+impl InvalidHistory {
+    pub fn new(history: &str, path: &PathBuf) -> Self {
+        Self {
+            error: E0014_MSG.to_string(),
+            history: history.to_string(),
+            path: path
+                .to_str()
+                .expect("path is not valid unicode")
+                .to_string(),
+        }
+    }
+}
+
+impl_responder!(InvalidHistory, StatusCode::INTERNAL_SERVER_ERROR, E0014_MSG);
 /// Api errors that can be used outside of actix handlers.
 /// You should always be using this.
 #[derive(Error, Debug)]
@@ -379,7 +403,7 @@ pub enum BookrabError {
     #[error("{}\ncause: {:#?}", serde_json::to_string(.0).unwrap(), .1)]
     CouldntReadChild(CouldntReadChild, anyhow::Error),
     #[error("{}", serde_json::to_string(.0).unwrap())]
-    InvalidMetadata(InvalidMetadata),
+    InvalidTags(InvalidTags),
     #[error("{}\ncause: {:#?}", serde_json::to_string(.0).unwrap(), .1)]
     CouldntReadFile(CouldntReadFile, anyhow::Error),
     #[error("{}\ncause: {:#?}", serde_json::to_string(.0).unwrap(), .1)]
@@ -392,6 +416,8 @@ pub enum BookrabError {
     RegexProblem(RegexProblem, anyhow::Error),
     #[error("{}\ncause: {:#?}", serde_json::to_string(.0).unwrap(), .1)]
     GrepSearchError(GrepSearchError, anyhow::Error),
+    #[error("{}", serde_json::to_string(.0).unwrap())]
+    InvalidHistory(InvalidHistory),
 }
 
 impl BookrabError {
@@ -406,7 +432,7 @@ impl BookrabError {
                 error!("{e:#?}");
                 err.to_res()
             }
-            Self::InvalidMetadata(err) => err.to_res(),
+            Self::InvalidTags(err) => err.to_res(),
             Self::CouldntReadChild(err, e) => {
                 error!("{e:#?}");
                 err.to_res()
@@ -435,6 +461,7 @@ impl BookrabError {
                 error!("{e:#?}");
                 err.to_res()
             }
+            Self::InvalidHistory(err) => err.to_res(),
         }
     }
 }
@@ -460,10 +487,11 @@ pub enum InternalServerErrors {
     CouldntWriteFile(#[content("application/json")] CouldntWriteFile),
     MessedUpBookFolder(#[content("application/json")] MessedUpBookFolder),
     CouldntReadChild(#[content("application/json")] CouldntReadChild),
-    InvalidMetadata(#[content("application/json")] InvalidMetadata),
+    InvalidTags(#[content("application/json")] InvalidTags),
     CouldntReadFile(#[content("application/json")] CouldntReadFile),
     CouldntReadDir(#[content("application/json")] CouldntReadDir),
     GrepSearchError(#[content("application/json")] GrepSearchError),
+    InvalidHistory(#[content("application/json")] InvalidHistory),
 }
 
 #[derive(ToSchema, ToResponse)]

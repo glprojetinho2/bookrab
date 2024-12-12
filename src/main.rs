@@ -10,7 +10,7 @@ pub mod errors;
 mod views;
 use actix_multipart::form::tempfile::TempFileConfig;
 use actix_web::{middleware::Logger, App, HttpServer};
-use config::get_config;
+use config::{ensure_config_works, ensure_confy_works};
 use utoipa::{
     openapi::{self},
     Modify, OpenApi,
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let server = HttpServer::new(move || {
         let doc = ApiDoc::openapi();
-        let config = get_config();
+        let config = ensure_confy_works();
         if !&config.book_path.is_dir() {
             fs::create_dir_all(&config.book_path).expect("couldn't create book folder");
         }

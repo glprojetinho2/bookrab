@@ -1,7 +1,7 @@
 use crate::{
     books::{BookListElement, RootBookDir},
-    config::{get_config, BookrabConfig},
-    errors::{CouldntReadChild, CouldntReadFile, InvalidMetadata},
+    config::{ensure_config_works, ensure_confy_works, BookrabConfig},
+    errors::{CouldntReadChild, CouldntReadFile, InvalidTags},
 };
 use actix_web::{get, HttpResponse, Responder};
 use utoipa::{ToResponse, ToSchema};
@@ -11,7 +11,7 @@ use utoipa::{ToResponse, ToSchema};
 enum ListError {
     CouldntReadChild(#[content("application/json")] CouldntReadChild),
     CouldntReadFile(#[content("application/json")] CouldntReadFile),
-    InvalidMetadata(#[content("application/json")] InvalidMetadata),
+    InvalidTags(#[content("application/json")] InvalidTags),
 }
 
 /// Lists all books with their metadata.
@@ -23,11 +23,11 @@ enum ListError {
 )]
 #[get("/list")]
 pub async fn list() -> impl Responder {
-    _list(get_config())
+    _list(ensure_confy_works())
 }
 
 pub fn _list(config: BookrabConfig) -> HttpResponse {
-    let book_dir = RootBookDir::new(config.book_path);
+    let book_dir = RootBookDir::new(config);
     let listing = match book_dir.list() {
         Ok(v) => v,
         Err(e) => return e.to_res(),

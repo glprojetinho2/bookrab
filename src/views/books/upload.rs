@@ -9,7 +9,7 @@ use actix_web::{post, HttpResponse, Responder};
 use log::error;
 use utoipa::ToSchema;
 
-use crate::{config::get_config, errors::ShouldBeTextPlain};
+use crate::{config::ensure_confy_works, errors::ShouldBeTextPlain};
 
 /// Represents a form for book uploading.
 /// The books currently have to be .txt files.
@@ -34,8 +34,8 @@ struct BookForm {
 )]
 #[post("/upload")]
 pub async fn upload(MultipartForm(form): MultipartForm<BookForm>) -> impl Responder {
-    let config = get_config();
-    let book_dir = RootBookDir::new(config.book_path);
+    let config = ensure_confy_works();
+    let book_dir = RootBookDir::new(config);
 
     let mut file = form.book;
     if let Some(v) = file.content_type {
