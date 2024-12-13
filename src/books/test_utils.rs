@@ -2,7 +2,7 @@ use std::{collections::HashSet, env::temp_dir, fs};
 
 use rand::{distributions::Alphanumeric, Rng};
 
-use crate::config::{ensure_config_works, BookrabConfig};
+use crate::config::{ensure_config_works, BookrabConfig, HistoryType};
 
 use super::RootBookDir;
 
@@ -127,6 +127,8 @@ pub fn create_book_dir() -> RootBookDir {
     RootBookDir::new(ensure_config_works(BookrabConfig {
         history_path: history_file,
         book_path: book_dir,
+        history_type: HistoryType::ALL,
+        database_url: String::from("postgres://bookrab:bookStrongPass@localhost/bookrab_db"),
     }))
 }
 pub fn root_for_tag_tests() -> RootBookDir {
@@ -142,6 +144,8 @@ pub fn root_for_tag_tests() -> RootBookDir {
     let config = BookrabConfig {
         history_path: history_file,
         book_path: book_dir,
+        history_type: HistoryType::ALL,
+        database_url: String::from("postgres://bookrab:bookStrongPass@localhost/bookrab_db"),
     };
     if config.book_path.exists() {
         return RootBookDir::new(ensure_config_works(config));

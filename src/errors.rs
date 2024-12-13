@@ -25,6 +25,7 @@ pub const E0011_MSG: &str = "E0011: book doesnt exist.";
 pub const E0012_MSG: &str = "E0012: problematic regex pattern.";
 pub const E0013_MSG: &str = "E0013: couldn't search file (even though it exists).";
 pub const E0014_MSG: &str = "E0014: invalid history entry.";
+pub const E0015_MSG: &str = "E0015: database error.";
 
 macro_rules! impl_responder {
     ($struct: ident, $status: expr, $msg: expr) => {
@@ -386,6 +387,29 @@ impl InvalidHistory {
 }
 
 impl_responder!(InvalidHistory, StatusCode::INTERNAL_SERVER_ERROR, E0014_MSG);
+
+/// Responds with [`E0015_MSG`]
+/// Database error.
+#[derive(
+    serde::Serialize, serde::Deserialize, utoipa::ToSchema, utoipa::ToResponse, Debug, PartialEq,
+)]
+pub struct DatabaseError {
+    #[schema(default = json!(E0015_MSG))]
+    pub error: String,
+    pub cause: String,
+}
+
+impl DatabaseError {
+    pub fn new(cause: String) -> Self {
+        Self {
+            error: E0015_MSG.to_string(),
+            cause,
+        }
+    }
+}
+
+impl_responder!(DatabaseError, StatusCode::INTERNAL_SERVER_ERROR, E0015_MSG);
+
 /// Api errors that can be used outside of actix handlers.
 /// You should always be using this.
 #[derive(Error, Debug)]
@@ -418,6 +442,8 @@ pub enum BookrabError {
     GrepSearchError(GrepSearchError, anyhow::Error),
     #[error("{}", serde_json::to_string(.0).unwrap())]
     InvalidHistory(InvalidHistory),
+    #[error("{}\ncause: {:#?}", serde_json::to_string(.0).unwrap(), .1)]
+    DatabaseError(DatabaseError, anyhow::Error),
 }
 
 impl BookrabError {
@@ -462,6 +488,10 @@ impl BookrabError {
                 err.to_res()
             }
             Self::InvalidHistory(err) => err.to_res(),
+            Self::DatabaseError(err, e) => {
+                error!("{e:#?}");
+                err.to_res()
+            }
         }
     }
 }
@@ -470,6 +500,12 @@ impl From<grep_regex::Error> for BookrabError {
     fn from(err: grep_regex::Error) -> Self {
         let bookrab_error = RegexProblem::new(err.clone());
         BookrabError::RegexProblem(bookrab_error, anyhow!(err))
+    }
+}
+impl From<diesel::result::Error> for BookrabError {
+    fn from(err: diesel::result::Error) -> Self {
+        let bookrab_error = DatabaseError::new(format!("{:#?}", err));
+        BookrabError::DatabaseError(bookrab_error, anyhow!(err))
     }
 }
 
@@ -492,6 +528,7 @@ pub enum InternalServerErrors {
     CouldntReadDir(#[content("application/json")] CouldntReadDir),
     GrepSearchError(#[content("application/json")] GrepSearchError),
     InvalidHistory(#[content("application/json")] InvalidHistory),
+    DatabaseError(#[content("application/json")] DatabaseError),
 }
 
 #[derive(ToSchema, ToResponse)]

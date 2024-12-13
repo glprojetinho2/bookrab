@@ -6,11 +6,13 @@ use std::fs;
 use utoipa_redoc::{Redoc, Servable};
 mod books;
 pub mod config;
+pub mod database;
 pub mod errors;
+pub mod schema;
 mod views;
 use actix_multipart::form::tempfile::TempFileConfig;
 use actix_web::{middleware::Logger, App, HttpServer};
-use config::{ensure_config_works, ensure_confy_works};
+use config::ensure_confy_works;
 use utoipa::{
     openapi::{self},
     Modify, OpenApi,

@@ -3,6 +3,7 @@ mod test_utils;
 mod utils;
 use crate::{
     config::BookrabConfig,
+    database::establish_connection,
     errors::{GrepSearchError, InexistentBook},
 };
 use anyhow::anyhow;
@@ -458,8 +459,10 @@ impl RootBookDir {
                 &book_path,
             )));
         }
-        let res =
-            SearchHistory::new(self.config.clone()).register_history(pattern, vec![results])?;
+        let results_vec = vec![results];
+        let connection = establish_connection();
+        let mut search_history = SearchHistory::new(self.config.clone(), Some(connection));
+        let res = search_history.register_history(pattern, &results_vec)?;
         Ok(res.first().unwrap().to_owned())
     }
 
@@ -486,7 +489,10 @@ impl RootBookDir {
             )?;
             search_results.push(single_search);
         }
-        SearchHistory::new(self.config.clone()).register_history(pattern, search_results)
+        let connection = establish_connection();
+        let mut search_history = SearchHistory::new(self.config.clone(), Some(connection));
+        let res = search_history.register_history(pattern, &search_results)?;
+        Ok(res.to_owned())
     }
 }
 
