@@ -41,14 +41,10 @@ pub async fn search(form: web::Query<SearchForm>) -> HttpResponse {
         .after_context(form.after_context.unwrap_or_default())
         .before_context(form.before_context.unwrap_or_default())
         .build();
-    let matcher = match RegexMatcherBuilder::new()
+    let mut builder = RegexMatcherBuilder::new();
+    let matcher_builder = builder
         .case_insensitive(form.case_insensitive.unwrap_or(false))
-        .case_smart(form.case_smart.unwrap_or(false))
-        .build(form.pattern.as_str())
-    {
-        Ok(v) => v,
-        Err(e) => return RegexProblem::new(e).into(),
-    };
+        .case_smart(form.case_smart.unwrap_or(false));
     let root = RootBookDir::new(config);
     //TODO: maybe there is a way to remove those .clone()'s?
     let include = Include {
@@ -69,7 +65,13 @@ pub async fn search(form: web::Query<SearchForm>) -> HttpResponse {
             .into_iter()
             .collect(),
     };
-    let search_results = match root.search_by_tags(include, exclude, searcher, matcher) {
+    let search_results = match root.search_by_tags(
+        include,
+        exclude,
+        form.pattern.clone(),
+        searcher,
+        matcher_builder.clone(),
+    ) {
         Ok(v) => v,
         Err(e) => return e.into(),
     };

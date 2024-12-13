@@ -8,7 +8,7 @@ use crate::{
 use anyhow::anyhow;
 use core::str;
 use grep_matcher::{Match, Matcher};
-use grep_regex::RegexMatcher;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{Searcher, Sink, SinkContextKind};
 use history::SearchHistory;
 use log::error;
@@ -435,9 +435,14 @@ impl RootBookDir {
     pub fn search(
         &self,
         title: String,
+        // we have to pass a pattern and a builder to this function
+        // because there is no way to extract the pattern from a
+        // RegexMatcher (AFAIK).
+        pattern: String,
         mut searcher: Searcher,
-        matcher: RegexMatcher,
+        matcher_builder: RegexMatcherBuilder,
     ) -> Result<SearchResults, BookrabError> {
+        let matcher = matcher_builder.build(pattern.as_str())?;
         let mut results = SearchResults::new(title.clone());
         let book_path = self.config.book_path.join(title).join("txt");
         let sink = &mut results.sink(matcher);
@@ -453,27 +458,35 @@ impl RootBookDir {
                 &book_path,
             )));
         }
-        let res = SearchHistory::new(self.config.clone()).register_history(vec![results])?;
+        let res =
+            SearchHistory::new(self.config.clone()).register_history(pattern, vec![results])?;
         Ok(res.first().unwrap().to_owned())
     }
 
     /// Searches stuff in all books that respect some
     /// tag constraint. See [RootBookDir::list_by_tags].
+    /// This also generates history entries.
     pub fn search_by_tags(
         &self,
         include: Include,
         exclude: Exclude,
+        pattern: String,
         searcher: Searcher,
-        matcher: RegexMatcher,
+        matcher_builder: RegexMatcherBuilder,
     ) -> Result<Vec<SearchResults>, BookrabError> {
         let book_list = self.list_by_tags(include, exclude)?;
         let mut search_results = vec![];
         for book in book_list {
             let title = book.title;
-            let single_search = self.search(title, searcher.clone(), matcher.clone())?;
+            let single_search = self.search(
+                title,
+                pattern.clone(),
+                searcher.clone(),
+                matcher_builder.clone(),
+            )?;
             search_results.push(single_search);
         }
-        SearchHistory::new(self.config.clone()).register_history(search_results)
+        SearchHistory::new(self.config.clone()).register_history(pattern, search_results)
     }
 }
 
@@ -757,7 +770,7 @@ mod tests {
     }
 
     macro_rules! test_search {
-        ($name:ident, $searcher: expr, $matcher: expr, $expected_results: expr) => {
+        ($name:ident, $searcher: expr, $pattern: expr, $matcher_builder: expr, $expected_results: expr) => {
             #[test]
             fn $name() -> Result<(), anyhow::Error> {
                 let book_dir = create_book_dir();
@@ -765,12 +778,18 @@ mod tests {
                     .upload("lusiadas", LUSIADAS1, basic_metadata())
                     .unwrap();
                 let result = book_dir
-                    .search(String::from("lusiadas"), $searcher, $matcher)
+                    .search(
+                        String::from("lusiadas"),
+                        $pattern,
+                        $searcher,
+                        $matcher_builder.clone(),
+                    )
                     .unwrap();
                 assert_eq!(result.title, "lusiadas");
                 assert_eq!(result.results, $expected_results);
                 let history_str = fs::read_to_string(book_dir.config.history_path).unwrap();
                 let now = Utc::now();
+                assert!(history_str.contains("lusiadas"));
                 assert!(history_str.contains("lusiadas"));
                 assert!(history_str.contains("[matched]"));
                 assert!(history_str.contains(now.year().to_string().as_str()));
@@ -781,14 +800,16 @@ mod tests {
     test_search!(
         basic_search,
         SearcherBuilder::new().build(),
-        RegexMatcher::new(r"\bpadeceu\b").unwrap(),
+        r"\bpadeceu\b".to_string(),
+        RegexMatcherBuilder::new(),
         vec!["Que [matched]padeceu[/matched] desonra e vitupério,\n"]
     );
 
     test_search!(
         multiple_results_in_one_line_search,
         SearcherBuilder::new().build(),
-        RegexMatcher::new(r"v").unwrap(),
+        r"v".to_string(),
+        RegexMatcherBuilder::new(),
         vec![
             "Obedece o [matched]v[/matched]isíbil e ín[matched]v[/matched]isíbil\n",
             "Que padeceu desonra e [matched]v[/matched]itupério,\n",
@@ -805,10 +826,9 @@ mod tests {
     test_search!(
         search_with_after_context,
         SearcherBuilder::new().after_context(2).build(),
+        r"\bpor\w*?".to_string(),
         RegexMatcherBuilder::new()
-            .case_insensitive(true)
-            .build(r"\bpor\w*?")
-            .unwrap(),
+            .case_insensitive(true),
         vec![
             "[matched]Por[/matched] subir os mortais da Terra ao Céu.\n\nDeste Deus-Homem, alto e infinito,\n",
             "Como amigo as verás; [matched]por[/matched]que eu me obrigo,\nQue nunca as queiras ver como inimigo.\n\n"
@@ -817,10 +837,9 @@ mod tests {
     test_search!(
         search_with_before_context,
         SearcherBuilder::new().before_context(2).build(),
+            r"\bpor\w*?".to_string(),
         RegexMatcherBuilder::new()
-            .case_insensitive(true)
-            .build(r"\bpor\w*?")
-            .unwrap(),
+            .case_insensitive(true),
             vec![
                 "Sofrendo morte injusta e insofríbil,\nE que do Céu à Terra, enfim desceu,\n[matched]Por[/matched] subir os mortais da Terra ao Céu.\n", 
                 "Se as armas queres ver, como tens dito,\nCumprido esse desejo te seria;\nComo amigo as verás; [matched]por[/matched]que eu me obrigo,\n"
@@ -832,10 +851,9 @@ mod tests {
             .before_context(1)
             .after_context(1)
             .build(),
+            r"\bpor\w*?".to_string(),
         RegexMatcherBuilder::new()
-            .case_insensitive(true)
-            .build(r"\bpor\w*?")
-            .unwrap(),
+            .case_insensitive(true),
         vec!["E que do Céu à Terra, enfim desceu,\n[matched]Por[/matched] subir os mortais da Terra ao Céu.\n\n", "Cumprido esse desejo te seria;\nComo amigo as verás; [matched]por[/matched]que eu me obrigo,\nQue nunca as queiras ver como inimigo.\n"]
     );
 
@@ -854,12 +872,16 @@ mod tests {
             .before_context(1)
             .after_context(1)
             .build();
-        let matcher = RegexMatcherBuilder::new()
-            .case_insensitive(true)
-            .build(r"\bpor\w*?")
-            .unwrap();
+        let mut builder = RegexMatcherBuilder::new();
+        let matcher_builder = builder.case_insensitive(true);
         let search_results = book_dir
-            .search_by_tags(include, exclude, searcher, matcher)
+            .search_by_tags(
+                include,
+                exclude,
+                r"\bpor\w*?".to_string(),
+                searcher,
+                matcher_builder.clone(),
+            )
             .unwrap();
         assert_eq!(search_results,
         vec![
