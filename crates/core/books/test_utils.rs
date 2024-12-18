@@ -1,8 +1,8 @@
-use std::{collections::HashSet, env::temp_dir, fs};
+use std::{collections::HashSet, env::temp_dir};
 
 use rand::{distributions::Alphanumeric, Rng};
 
-use crate::config::{ensure_config_works, BookrabConfig, HistoryType};
+use crate::config::{ensure_config_works, BookrabConfig};
 
 use super::RootBookDir;
 
@@ -122,14 +122,14 @@ pub fn create_book_dir() -> RootBookDir {
 
     let temp = temp_dir().to_path_buf();
     let book_dir = temp.join("bookrab-test-".to_string() + &random_name);
-    let history_file = temp.join("bookrab-history-".to_string() + &random_name);
 
-    RootBookDir::new(ensure_config_works(BookrabConfig {
-        history_path: history_file,
-        book_path: book_dir,
-        history_type: HistoryType::ALL,
-        database_url: String::from("postgres://bookrab:bookStrongPass@localhost/bookrab_db"),
-    }))
+    RootBookDir::new(
+        ensure_config_works(&BookrabConfig {
+            book_path: book_dir,
+            database_url: String::from("postgres://bookrab:bookStrongPass@localhost/bookrab_db"),
+        })
+        .clone(),
+    )
 }
 pub fn root_for_tag_tests() -> RootBookDir {
     let random_name: String = rand::thread_rng()
@@ -139,18 +139,15 @@ pub fn root_for_tag_tests() -> RootBookDir {
         .collect();
     let temp = temp_dir().to_path_buf();
     let book_dir = temp.join("tag_testing_bookrab");
-    let history_file = temp.join("bookrab-history".to_string() + &random_name);
 
     let config = BookrabConfig {
-        history_path: history_file,
         book_path: book_dir,
-        history_type: HistoryType::ALL,
         database_url: String::from("postgres://bookrab:bookStrongPass@localhost/bookrab_db"),
     };
     if config.book_path.exists() {
-        return RootBookDir::new(ensure_config_works(config));
+        return RootBookDir::new(ensure_config_works(&config).clone());
     }
-    let root = RootBookDir::new(ensure_config_works(config));
+    let root = RootBookDir::new(ensure_config_works(&config).clone());
     root.upload("1", LUSIADAS1, s(vec!["a", "b", "c", "d"]))
         .unwrap()
         .upload("2", LUSIADAS2, s(vec!["a", "b", "c"]))

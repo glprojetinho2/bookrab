@@ -1,30 +1,23 @@
 mod history;
+mod sink;
 mod test_utils;
 mod utils;
-use crate::{
-    config::BookrabConfig,
-    database::establish_connection,
-    errors::{GrepSearchError, InexistentBook},
-};
-use anyhow::anyhow;
+
+use crate::{config::BookrabConfig, database::establish_connection};
 use core::str;
-use grep_matcher::{Match, Matcher};
-use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{Searcher, Sink, SinkContextKind};
+use grep_matcher::Matcher;
+use grep_regex::RegexMatcherBuilder;
+use grep_searcher::Searcher;
 use history::SearchHistory;
 use log::error;
-use std::{collections::HashSet, fs, io};
-use utils::{find_iter_at_in_context_single_line, from_utf8};
-use utoipa::ToSchema;
+use sink::BookSink;
+use std::{collections::HashSet, fs};
 
-use crate::errors::{
-    BookrabError, CouldntCreateDir, CouldntReadChild, CouldntReadDir, CouldntReadFile,
-    CouldntWriteFile, InvalidTags,
-};
+use crate::errors::BookrabError;
 
 /// Represents elements returned by the listing
 /// route.
-#[derive(Debug, serde::Deserialize, serde::Serialize, ToSchema, PartialEq)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct BookListElement {
     /// Book title
     title: String,
@@ -33,7 +26,7 @@ pub struct BookListElement {
 }
 
 /// Manages the way that books will be filtered by tags.
-#[derive(Clone, Debug, ToSchema, Default, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 pub enum FilterMode {
     /// Grabs books that have all of the tags.
     All,
@@ -56,7 +49,7 @@ pub struct Include {
 }
 
 /// Associates search results with the title of a book.
-#[derive(Clone, Debug, PartialEq, ToSchema, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct SearchResults {
     title: String,
     results: Vec<String>,
@@ -76,165 +69,10 @@ impl SearchResults {
     }
 }
 
-/// Sink to be used in book searches.
-/// It doesn't support passthru.
-pub struct BookSink<'a, T: Matcher> {
-    results: &'a mut SearchResults,
-    matcher: T,
-    matches: Vec<Match>,
-    after_context_id: usize,
-}
-
-impl<T: Matcher> BookSink<'_, T> {
-    /// Execute the matcher over the given bytes and record the match locations.
-    fn record_matches(
-        &mut self,
-        searcher: &Searcher,
-        bytes: &[u8],
-        range: std::ops::Range<usize>,
-    ) -> io::Result<()> {
-        self.matches.clear();
-        // If printing requires knowing the location of each individual match,
-        // then compute and stored those right now for use later. While this
-        // adds an extra copy for storing the matches, we do amortize the
-        // allocation for it and this greatly simplifies the printing logic to
-        // the extent that it's easy to ensure that we never do more than
-        // one search to find the matches (well, for replacements, we do one
-        // additional search to perform the actual replacement).
-        let matches = &mut self.matches;
-        find_iter_at_in_context_single_line(searcher, &self.matcher, bytes, range.clone(), |m| {
-            let (s, e) = (m.start() - range.start, m.end() - range.start);
-            matches.push(Match::new(s, e));
-            true
-        })?;
-        // Don't report empty matches appearing at the end of the bytes.
-        if !matches.is_empty()
-            && matches.last().unwrap().is_empty()
-            && matches.last().unwrap().start() >= range.end
-        {
-            matches.pop().unwrap();
-        }
-        Ok(())
-    }
-
-    /// Creates new [BookSink] instance from [SearchResults] instance
-    fn new(results: &mut SearchResults, matcher: T) -> BookSink<T> {
-        BookSink {
-            results,
-            matcher,
-            matches: vec![],
-            after_context_id: 0,
-        }
-    }
-    /// Pushes string to the last entry in `self.results.results`.
-    /// The string is obtained by converting `bytes` into UTF-8.
-    /// Example in my pseudo-language:
-    /// ```
-    /// results == ["not last", "last"]
-    /// this_func(" string".bytes())
-    /// results == ["not last", "last string"]
-    /// ```
-    fn push_to_last_entry(&mut self, value: &str) -> Result<(), std::io::Error> {
-        let mut current_result = self.results.results.pop().unwrap_or_default();
-        current_result += value;
-        self.results.results.push(current_result);
-        Ok(())
-    }
-}
-impl<T: Matcher> Sink for BookSink<'_, T> {
-    type Error = std::io::Error;
-
-    fn matched(
-        &mut self,
-        searcher: &grep_searcher::Searcher,
-        mat: &grep_searcher::SinkMatch<'_>,
-    ) -> Result<bool, Self::Error> {
-        // Mathes are always appended to the last
-        // entry of the results with `self.push_to_last_entry`.
-        // If there is no after_context, then matches are treated the
-        // same as the last contextual line of the `After` kind
-        // (see the comment in the context function).
-
-        // here we add [matched] [/matched] around the search result.
-        self.record_matches(searcher, mat.buffer(), mat.bytes_range_in_buffer())?;
-        let raw_result = from_utf8(mat.bytes())?;
-        let mut result_with_matched_tags = String::from(raw_result);
-        let opening_tag = "[matched]";
-        let closing_tag = "[/matched]";
-        for m in self.matches.iter() {
-            let offset = result_with_matched_tags.len() - raw_result.len();
-            let start = m.start() + offset;
-            let end = m.end() + offset;
-            let r = result_with_matched_tags;
-            result_with_matched_tags = format!(
-                "{}{}{}{}{}",
-                &r[..start],
-                opening_tag,
-                &r[start..end],
-                closing_tag,
-                &r[end..]
-            );
-        }
-        self.push_to_last_entry(result_with_matched_tags.as_str())?;
-        if searcher.after_context() == 0 {
-            self.results.results.push("".to_string());
-        }
-
-        Ok(true)
-    }
-
-    fn context(
-        &mut self,
-        searcher: &grep_searcher::Searcher,
-        context: &grep_searcher::SinkContext<'_>,
-    ) -> Result<bool, Self::Error> {
-        // Context lines are always appended to the last
-        // entry of the results with `self.push_to_last_entry`
-        // If the function detects that this is the last `After` context,
-        // it pushes an empty string to the results.
-        // # Example
-        // Let's say that the searcher has after_context = 2. In that case
-        // the Sink is going to process data in the following way:
-        // match comes in => results == ["match"]
-        // first contextual line => results == ["match context1"]
-        // second contextual line => results == ["match context1 context2", ""] <= observe the empty string
-        // another match => results = ["match context1 context2", "another match"]
-        // and so on.
-        self.push_to_last_entry(from_utf8(context.bytes())?)?;
-        if let SinkContextKind::After = context.kind() {
-            self.after_context_id += 1;
-            if self.after_context_id == searcher.after_context() {
-                self.after_context_id = 0;
-                self.results.results.push("".to_string());
-            }
-        }
-
-        Ok(true)
-    }
-    fn finish(
-        &mut self,
-        _searcher: &Searcher,
-        _: &grep_searcher::SinkFinish,
-    ) -> Result<(), Self::Error> {
-        // If the last element of `results` is an empty string,
-        // (I believe this is always the case) then remove it.
-        if self
-            .results
-            .results
-            .last()
-            .unwrap_or(&String::new())
-            .is_empty()
-        {
-            self.results.results.pop();
-        };
-        Ok(())
-    }
-}
-
 /// Represents a root book folder.
 /// In this folder we are going to store texts and metadata
 /// in the way explained bellow:
-/// ```
+/// ```no_compile
 /// path/to/root_book_dir/ <= this is the `path` we use in this struct
 /// ├─ book_title1/ <= folder with the book's title as its name
 /// │  ├─ txt <= full text of the book
@@ -316,14 +154,15 @@ impl RootBookDir {
 
     /// Lists all books in the form of [BookListElement]
     pub fn list(&self) -> Result<Vec<BookListElement>, BookrabError> {
-        let books_dir = match fs::read_dir(self.config.book_path.clone()) {
+        let books_dir = match fs::read_dir(&self.config.book_path) {
             Ok(v) => v,
             Err(e) => {
                 error!("{e:#?}");
-                return Err(BookrabError::CouldntReadDir(
-                    CouldntReadDir::new(&self.config.book_path),
-                    anyhow!(e),
-                ));
+                return Err(BookrabError::CouldntReadDir {
+                    error: (),
+                    path: self.config.book_path.clone(),
+                    err: e,
+                });
             }
         };
         let mut result = vec![];
@@ -331,18 +170,11 @@ impl RootBookDir {
             let book_dir = match book_dir_res {
                 Ok(v) => v,
                 Err(e) => {
-                    return {
-                        error!("{:#?}", e);
-                        Err(BookrabError::CouldntReadChild(
-                            CouldntReadChild::new(
-                                self.config
-                                    .book_path
-                                    .to_str()
-                                    .unwrap_or("path is not even valid unicode"),
-                            ),
-                            anyhow!(e),
-                        ))
-                    }
+                    return Err(BookrabError::CouldntReadChild {
+                        error: (),
+                        parent: self.config.book_path.clone(),
+                        err: e,
+                    })
                 }
             };
             let book_title = book_dir.file_name().to_str().unwrap().to_string();
@@ -353,13 +185,11 @@ impl RootBookDir {
                 match fs::read_to_string(&tags_path) {
                     Ok(v) => v,
                     Err(e) => {
-                        return {
-                            error!("{e:#?}");
-                            Err(BookrabError::CouldntReadFile(
-                                CouldntReadFile::new(&tags_path),
-                                anyhow!(e),
-                            ))
-                        }
+                        return Err(BookrabError::CouldntReadFile {
+                            error: (),
+                            path: tags_path,
+                            err: e,
+                        })
                     }
                 }
             } else {
@@ -369,13 +199,12 @@ impl RootBookDir {
             let tags: HashSet<String> = match serde_json::from_str(tags_contents.as_str()) {
                 Ok(v) => v,
                 Err(e) => {
-                    return {
-                        error!("{:#?}", e);
-                        Err(BookrabError::InvalidTags(InvalidTags::new(
-                            tags_contents.as_str(),
-                            &tags_path,
-                        )))
-                    }
+                    return Err(BookrabError::InvalidTags {
+                        error: (),
+                        tags: tags_contents,
+                        path: tags_path,
+                        err: e,
+                    })
                 }
             };
 
@@ -401,19 +230,21 @@ impl RootBookDir {
         let book_path = &self.config.book_path.join(title);
         if let Err(e) = fs::create_dir_all(book_path) {
             if e.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(BookrabError::CouldntCreateDir(
-                    CouldntCreateDir::new(book_path),
-                    anyhow!(e),
-                ));
+                return Err(BookrabError::CouldntCreateDir {
+                    error: (),
+                    path: book_path.to_owned(),
+                    err: e,
+                });
             }
         }
         // write text
         let txt_path = book_path.join("txt");
         if let Err(e) = fs::write(&txt_path, txt) {
-            return Err(BookrabError::CouldntWriteFile(
-                CouldntWriteFile::new(&txt_path),
-                anyhow!(e),
-            ));
+            return Err(BookrabError::CouldntWriteFile {
+                error: (),
+                path: txt_path,
+                err: e,
+            });
         };
 
         // write metadata
@@ -421,10 +252,11 @@ impl RootBookDir {
             serde_json::to_string(&tags).expect("BookTags could not be converted to string");
         let tags_path = book_path.join(Self::INFO_PATH);
         if let Err(e) = fs::write(&tags_path, tags_str) {
-            return Err(BookrabError::CouldntWriteFile(
-                CouldntWriteFile::new(&tags_path),
-                anyhow!(e),
-            ));
+            return Err(BookrabError::CouldntWriteFile {
+                error: (),
+                path: tags_path,
+                err: e,
+            });
         };
         Ok(self)
     }
@@ -449,19 +281,21 @@ impl RootBookDir {
         let sink = &mut results.sink(matcher);
         if book_path.exists() {
             if let Err(e) = searcher.search_path(sink.matcher.clone(), &book_path, sink) {
-                return Err(BookrabError::GrepSearchError(
-                    GrepSearchError::new(&book_path),
-                    anyhow!(e),
-                ));
+                return Err(BookrabError::GrepSearchError {
+                    error: (),
+                    path: book_path,
+                    err: e,
+                });
             };
         } else {
-            return Err(BookrabError::InexistentBook(InexistentBook::new(
-                &book_path,
-            )));
+            return Err(BookrabError::InexistentBook {
+                error: (),
+                path: book_path,
+            });
         }
         let results_vec = vec![results];
         let connection = establish_connection();
-        let mut search_history = SearchHistory::new(self.config.clone(), Some(connection));
+        let mut search_history = SearchHistory::new(self.config.clone(), connection);
         let res = search_history.register_history(pattern, &results_vec)?;
         Ok(res.first().unwrap().to_owned())
     }
@@ -490,7 +324,7 @@ impl RootBookDir {
             search_results.push(single_search);
         }
         let connection = establish_connection();
-        let mut search_history = SearchHistory::new(self.config.clone(), Some(connection));
+        let mut search_history = SearchHistory::new(self.config.clone(), connection);
         let res = search_history.register_history(pattern, &search_results)?;
         Ok(res.to_owned())
     }
@@ -499,8 +333,6 @@ impl RootBookDir {
 #[cfg(test)]
 mod tests {
     use crate::books::RootBookDir;
-    use chrono::Datelike;
-    use chrono::Utc;
     use grep_regex::RegexMatcherBuilder;
     use grep_searcher::SearcherBuilder;
     use test_utils::{basic_metadata, create_book_dir, root_for_tag_tests, s, LUSIADAS1};
@@ -602,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn list_invalid_metadata() -> Result<(), anyhow::Error> {
+    fn list_invalid_metadata() -> Result<(), BookrabError> {
         let book_dir = create_book_dir();
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
         let metadata_path = book_dir
@@ -612,13 +444,19 @@ mod tests {
             .join(RootBookDir::INFO_PATH);
         fs::write(&metadata_path, "meeeeeeeeeeeeeeeeeeeessed up").unwrap();
 
-        match book_dir.list().unwrap_err() {
-            BookrabError::InvalidTags(err) => {
-                assert_eq!(err.tags, "meeeeeeeeeeeeeeeeeeeessed up");
-                assert_eq!(err.path, metadata_path.to_string_lossy());
-            }
-            _ => return Err(anyhow!("isnt invalid metadata")),
+        if let BookrabError::InvalidTags {
+            error: (),
+            tags,
+            path,
+            err: _err,
+        } = book_dir.list().unwrap_err()
+        {
+            assert_eq!(tags, "meeeeeeeeeeeeeeeeeeeessed up");
+            assert_eq!(path, metadata_path);
+        } else {
+            panic!("isnt invalid metadata");
         }
+
         Ok(())
     }
     macro_rules! test_filter {
@@ -761,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn get_by_title() -> Result<(), anyhow::Error> {
+    fn get_by_title() -> Result<(), BookrabError> {
         let book_dir = create_book_dir();
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
         let book = book_dir.get_by_title("lusiadas".to_string())?.unwrap();
@@ -793,12 +631,6 @@ mod tests {
                     .unwrap();
                 assert_eq!(result.title, "lusiadas");
                 assert_eq!(result.results, $expected_results);
-                let history_str = fs::read_to_string(book_dir.config.history_path).unwrap();
-                let now = Utc::now();
-                assert!(history_str.contains("lusiadas"));
-                assert!(history_str.contains("lusiadas"));
-                assert!(history_str.contains("[matched]"));
-                assert!(history_str.contains(now.year().to_string().as_str()));
                 Ok(())
             }
         };

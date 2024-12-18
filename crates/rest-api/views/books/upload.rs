@@ -1,15 +1,14 @@
-use crate::{
-    books::RootBookDir,
-    errors::{BadRequestError, CouldntReadFile, InternalServerErrors, NotUnicode},
-};
 use std::{collections::HashSet, io::Read, path::PathBuf};
 
 use actix_multipart::form::{json::Json, tempfile::TempFile, MultipartForm};
 use actix_web::{post, HttpResponse, Responder};
-use log::error;
+use bookrab_core::{books::RootBookDir, errors::BookrabError};
 use utoipa::ToSchema;
 
-use crate::{config::ensure_confy_works, errors::ShouldBeTextPlain};
+use crate::{
+    config::ensure_confy_works,
+    errors::{ApiError, Bookrab400, Bookrab500},
+};
 
 /// Represents a form for book uploading.
 /// The books currently have to be .txt files.
@@ -28,8 +27,8 @@ struct BookForm {
     request_body(content_type = "multipart/form-data", content = BookForm),
     responses (
         (status = 200, description = "Success (without response body)"),
-        (status = 400, content((BadRequestError))),
-        (status = 500, content((InternalServerErrors))),
+        (status = 400, body = Bookrab400),
+        (status = 500, body = Bookrab500),
     )
 )]
 #[post("/upload")]
@@ -40,15 +39,22 @@ pub async fn upload(MultipartForm(form): MultipartForm<BookForm>) -> impl Respon
     let mut file = form.book;
     if let Some(v) = file.content_type {
         if v != "text/plain" {
-            return ShouldBeTextPlain::new(file.file_name.unwrap_or("".to_string()).as_str())
-                .to_res();
+            return ApiError(BookrabError::ShouldBeTextPlain {
+                error: (),
+                filename: file.file_name.unwrap_or("".to_string()),
+            })
+            .into();
         }
     };
     let file_name = PathBuf::from(file.file_name.unwrap());
     let mut txt = String::new();
     if let Err(e) = file.file.read_to_string(&mut txt) {
-        error!("{e:#?}");
-        return CouldntReadFile::new(&file_name).to_res();
+        return ApiError(BookrabError::CouldntReadFile {
+            error: (),
+            path: file_name,
+            err: e,
+        })
+        .into();
     };
     let mut tags = HashSet::new();
     for tag in form.tags.iter() {
@@ -56,11 +62,17 @@ pub async fn upload(MultipartForm(form): MultipartForm<BookForm>) -> impl Respon
     }
     let title = match file_name.to_str() {
         Some(v) => v,
-        None => return NotUnicode::new(file_name.to_string_lossy().to_string()).to_res(),
+        None => {
+            return ApiError(BookrabError::NotUnicode {
+                error: (),
+                what: file_name.to_string_lossy().to_string(),
+            })
+            .into()
+        }
     };
 
     if let Err(e) = book_dir.upload(title, txt.as_str(), tags) {
-        return e.to_res();
+        return ApiError(e).into();
     };
     HttpResponse::Ok().finish()
 }

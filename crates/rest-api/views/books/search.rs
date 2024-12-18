@@ -1,19 +1,23 @@
+use crate::{
+    config::ensure_confy_works,
+    errors::{ApiError, Bookrab400, Bookrab500},
+};
 use actix_web::{get, http::StatusCode, web, HttpResponse, HttpResponseBuilder};
+use bookrab_core::books::{Exclude, FilterMode, Include, RootBookDir};
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::SearcherBuilder;
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::{
-    books::{Exclude, FilterMode, Include, RootBookDir, SearchResults},
-    config::{ensure_config_works, ensure_confy_works},
-    errors::{BadRequestError, InternalServerErrors, RegexProblem},
-};
+#[derive(Debug, Deserialize, ToSchema)]
+struct SearchResultsUtoipa {
+    title: String,
+    results: Vec<String>,
+}
 
 /// Represents parameters that determine the way
 /// a search is made.
-#[derive(Debug, ToSchema, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Deserialize)]
 struct SearchForm {
     pattern: String,
     after_context: Option<usize>,
@@ -25,13 +29,34 @@ struct SearchForm {
     exclude_tags: Option<Vec<String>>,
     exclude_mode: Option<FilterMode>,
 }
+
+#[derive(Debug, Deserialize, ToSchema)]
+enum FilterModeUtoipa {
+    All,
+    Any,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct SearchFormUtoipa {
+    pattern: String,
+    after_context: Option<usize>,
+    before_context: Option<usize>,
+    case_insensitive: Option<bool>,
+    case_smart: Option<bool>,
+    include_tags: Option<Vec<String>>,
+    include_mode: Option<FilterModeUtoipa>,
+    exclude_tags: Option<Vec<String>>,
+    exclude_mode: Option<FilterModeUtoipa>,
+}
+
 /// Searches books filtered by tags.
 #[utoipa::path(
-    params(SearchForm),
+    params(SearchFormUtoipa),
     responses (
-        (status = 200, body=[SearchResults]),
-        (status = 400, content((BadRequestError))),
-        (status = 500, content((InternalServerErrors))),
+        (status = 200, body=[SearchResultsUtoipa]),
+        (status = 400, body=Bookrab400),
+        (status = 500, body=Bookrab500),
     )
 )]
 #[get("/search")]
@@ -73,7 +98,7 @@ pub async fn search(form: web::Query<SearchForm>) -> HttpResponse {
         matcher_builder.clone(),
     ) {
         Ok(v) => v,
-        Err(e) => return e.into(),
+        Err(e) => return ApiError(e).into(),
     };
     HttpResponseBuilder::new(StatusCode::OK)
         .content_type("application/json")

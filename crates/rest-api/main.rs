@@ -1,14 +1,13 @@
+use crate::errors::{Bookrab400, Bookrab500};
 use actix_files::Files;
 use actix_web::dev::Service;
-use books::FilterMode;
 use futures_util::FutureExt;
 use std::fs;
+use utoipa_rapidoc::RapiDoc;
 use utoipa_redoc::{Redoc, Servable};
-mod books;
+use utoipa_swagger_ui::SwaggerUi;
 pub mod config;
-pub mod database;
 pub mod errors;
-pub mod schema;
 mod views;
 use actix_multipart::form::tempfile::TempFileConfig;
 use actix_web::{middleware::Logger, App, HttpServer};
@@ -21,21 +20,22 @@ use utoipa_actix_web::AppExt;
 
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    log4rs::init_file("src/log4rs.yml", Default::default()).expect("logger didnt initialize");
-
+    log4rs::init_file("log4rs.yml", Default::default()).expect("logger didnt initialize");
     #[derive(OpenApi)]
     #[openapi(
         info(license(name = "MIT", identifier = "MIT")),
         modifiers(&ApiDocInfo),
-        components(schemas(FilterMode))
+        components(schemas(Bookrab400, Bookrab500))
     )]
     struct ApiDoc;
+
     struct ApiDocInfo;
     impl Modify for ApiDocInfo {
         fn modify(&self, openapi: &mut openapi::OpenApi) {
-            openapi.info.description = Some(include_str!("../README.md").to_string());
+            openapi.info.description = Some(include_str!("README.md").to_string());
         }
     }
+
     let server = HttpServer::new(move || {
         let doc = ApiDoc::openapi();
         let config = ensure_confy_works();
@@ -62,12 +62,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .service(utoipa_actix_web::scope("/v1/books").configure(views::books::configure()))
             .app_data(TempFileConfig::default().directory(&config.book_path))
             .openapi_service(|api| Redoc::with_url("/v1/redoc", api))
-            // .openapi_service(|api| {
-            //     RapiDoc::with_openapi("/api-docs/openapi.json", api).path("/rapidoc")
-            // })
-            // .openapi_service(|api| {
-            //     SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", api)
-            // })
+            .openapi_service(|api| {
+                RapiDoc::with_openapi("/api-docs/openapi.json", api).path("/rapidoc")
+            })
+            .openapi_service(|api| {
+                SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", api)
+            })
             .split_for_parts();
         app
     })
