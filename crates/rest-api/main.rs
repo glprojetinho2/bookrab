@@ -7,6 +7,7 @@ use utoipa_rapidoc::RapiDoc;
 use utoipa_redoc::{Redoc, Servable};
 use utoipa_swagger_ui::SwaggerUi;
 pub mod config;
+pub mod database;
 pub mod errors;
 mod views;
 use actix_multipart::form::tempfile::TempFileConfig;

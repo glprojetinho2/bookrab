@@ -3,7 +3,7 @@ mod sink;
 mod test_utils;
 mod utils;
 
-use crate::{config::BookrabConfig, database::establish_connection};
+use crate::{config::BookrabConfig, database::PgPooledConnection};
 use core::str;
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
@@ -81,15 +81,16 @@ impl SearchResults {
 /// │  ├─ txt
 /// │  ├─ tags.json
 /// ```
-#[derive(Debug)]
-pub struct RootBookDir {
+pub struct RootBookDir<'a> {
     config: BookrabConfig,
+    /// Connection to Postgresql
+    pub connection: &'a mut PgPooledConnection,
 }
 
-impl RootBookDir {
+impl<'a> RootBookDir<'a> {
     const INFO_PATH: &'static str = "tags.json";
-    pub fn new(config: BookrabConfig) -> RootBookDir {
-        RootBookDir { config }
+    pub fn new(config: BookrabConfig, connection: &mut PgPooledConnection) -> RootBookDir {
+        RootBookDir { config, connection }
     }
 
     /// Gets book according to its title.
@@ -266,7 +267,7 @@ impl RootBookDir {
     /// to the searcher (after_context, for example) or to the
     /// matcher (case_insensitive, for example).
     pub fn search(
-        &self,
+        &mut self,
         title: String,
         // we have to pass a pattern and a builder to this function
         // because there is no way to extract the pattern from a
@@ -294,8 +295,7 @@ impl RootBookDir {
             });
         }
         let results_vec = vec![results];
-        let connection = establish_connection();
-        let mut search_history = SearchHistory::new(self.config.clone(), connection);
+        let search_history = SearchHistory::new(self.config.clone(), self.connection);
         let res = search_history.register_history(pattern, &results_vec)?;
         Ok(res.first().unwrap().to_owned())
     }
@@ -304,7 +304,7 @@ impl RootBookDir {
     /// tag constraint. See [RootBookDir::list_by_tags].
     /// This also generates history entries.
     pub fn search_by_tags(
-        &self,
+        &mut self,
         include: Include,
         exclude: Exclude,
         pattern: String,
@@ -321,10 +321,9 @@ impl RootBookDir {
                 searcher.clone(),
                 matcher_builder.clone(),
             )?;
-            search_results.push(single_search);
+            search_results.push(single_search.to_owned());
         }
-        let connection = establish_connection();
-        let mut search_history = SearchHistory::new(self.config.clone(), connection);
+        let search_history = SearchHistory::new(self.config.clone(), self.connection);
         let res = search_history.register_history(pattern, &search_results)?;
         Ok(res.to_owned())
     }
@@ -332,6 +331,7 @@ impl RootBookDir {
 
 #[cfg(test)]
 mod tests {
+    use crate::books::test_utils::DBCONNECTION;
     use crate::books::RootBookDir;
     use grep_regex::RegexMatcherBuilder;
     use grep_searcher::SearcherBuilder;
@@ -341,7 +341,8 @@ mod tests {
 
     #[test]
     fn basic_uploading() -> Result<(), anyhow::Error> {
-        let book_dir = create_book_dir();
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let book_dir = create_book_dir(connection);
         let expected_text = "As armas e os barões assinalados";
         book_dir
             .upload("lusiadas", expected_text, basic_metadata())
@@ -364,7 +365,8 @@ mod tests {
     }
     #[test]
     fn overwriting_with_upload() -> Result<(), anyhow::Error> {
-        let book_dir = create_book_dir();
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let book_dir = create_book_dir(connection);
         let expected_text = "As armas e os barões assinalados";
         book_dir
             .upload(
@@ -394,7 +396,8 @@ mod tests {
     }
     #[test]
     fn basic_listing() -> Result<(), anyhow::Error> {
-        let book_dir = create_book_dir();
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let book_dir = create_book_dir(connection);
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
         let body = book_dir.list().unwrap();
         assert_eq!(body.len(), 1);
@@ -410,7 +413,8 @@ mod tests {
 
     #[test]
     fn list_two_items() -> Result<(), anyhow::Error> {
-        let book_dir = create_book_dir();
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let book_dir = create_book_dir(connection);
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
         book_dir.upload("sonetos", "", basic_metadata()).unwrap();
 
@@ -435,7 +439,8 @@ mod tests {
 
     #[test]
     fn list_invalid_metadata() -> Result<(), BookrabError> {
-        let book_dir = create_book_dir();
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let book_dir = create_book_dir(connection);
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
         let metadata_path = book_dir
             .config
@@ -460,8 +465,8 @@ mod tests {
         Ok(())
     }
     macro_rules! test_filter {
-        ($include:expr, $exclude: expr, $expected: expr) => {{
-            let book_dir = dbg!(root_for_tag_tests());
+        ($include:expr, $exclude: expr, $expected: expr, $connection: expr) => {{
+            let book_dir = root_for_tag_tests($connection);
             let books = book_dir.list_by_tags($include, $exclude).unwrap();
 
             let expected = $expected;
@@ -479,6 +484,7 @@ mod tests {
 
     #[test]
     fn filter_include_all() -> Result<(), anyhow::Error> {
+        let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
             Include {
                 mode: FilterMode::All,
@@ -488,12 +494,14 @@ mod tests {
                 mode: FilterMode::All,
                 tags: s(vec![]),
             },
-            s(vec!["1"])
+            s(vec!["1"]),
+            connection
         );
         Ok(())
     }
     #[test]
     fn filter_include_any() -> Result<(), anyhow::Error> {
+        let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
             Include {
                 mode: FilterMode::Any,
@@ -503,12 +511,14 @@ mod tests {
                 mode: FilterMode::All,
                 tags: s(vec![]),
             },
-            s(vec!["1", "2"])
+            s(vec!["1", "2"]),
+            connection
         );
         Ok(())
     }
     #[test]
     fn filter_exclude_all() -> Result<(), anyhow::Error> {
+        let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
             Include {
                 mode: FilterMode::Any,
@@ -518,12 +528,14 @@ mod tests {
                 mode: FilterMode::All,
                 tags: s(vec!["d", "c"]),
             },
-            s(vec!["2", "3", "4"])
+            s(vec!["2", "3", "4"]),
+            connection
         );
         Ok(())
     }
     #[test]
     fn filter_exclude_any() -> Result<(), anyhow::Error> {
+        let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
             Include {
                 mode: FilterMode::Any,
@@ -533,12 +545,14 @@ mod tests {
                 mode: FilterMode::Any,
                 tags: s(vec!["d", "c"]),
             },
-            s(vec!["3", "4"])
+            s(vec!["3", "4"]),
+            connection
         );
         Ok(())
     }
     #[test]
     fn filter_include_any_exclude_any() -> Result<(), anyhow::Error> {
+        let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
             Include {
                 mode: FilterMode::Any,
@@ -548,12 +562,14 @@ mod tests {
                 mode: FilterMode::Any,
                 tags: s(vec!["d", "c"]),
             },
-            s(vec!["3"])
+            s(vec!["3"]),
+            connection
         );
         Ok(())
     }
     #[test]
     fn filter_include_all_exclude_all() -> Result<(), anyhow::Error> {
+        let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
             Include {
                 mode: FilterMode::All,
@@ -563,12 +579,14 @@ mod tests {
                 mode: FilterMode::All,
                 tags: s(vec!["b", "d"]),
             },
-            s(vec!["2", "3"])
+            s(vec!["2", "3"]),
+            connection
         );
         Ok(())
     }
     #[test]
     fn filter_include_any_exclude_all() -> Result<(), anyhow::Error> {
+        let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
             Include {
                 mode: FilterMode::Any,
@@ -578,12 +596,14 @@ mod tests {
                 mode: FilterMode::All,
                 tags: s(vec!["a", "d"]),
             },
-            s(vec!["2", "3"])
+            s(vec!["2", "3"]),
+            connection
         );
         Ok(())
     }
     #[test]
     fn filter_include_all_exclude_any() -> Result<(), anyhow::Error> {
+        let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
             Include {
                 mode: FilterMode::All,
@@ -593,14 +613,16 @@ mod tests {
                 mode: FilterMode::Any,
                 tags: s(vec!["a", "d"]),
             },
-            s(vec![])
+            s(vec![]),
+            connection
         );
         Ok(())
     }
 
     #[test]
     fn get_by_title() -> Result<(), BookrabError> {
-        let book_dir = create_book_dir();
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let book_dir = create_book_dir(connection);
         book_dir.upload("lusiadas", "", basic_metadata()).unwrap();
         let book = book_dir.get_by_title("lusiadas".to_string())?.unwrap();
         assert_eq!(
@@ -617,7 +639,8 @@ mod tests {
         ($name:ident, $searcher: expr, $pattern: expr, $matcher_builder: expr, $expected_results: expr) => {
             #[test]
             fn $name() -> Result<(), anyhow::Error> {
-                let book_dir = create_book_dir();
+                let connection = &mut DBCONNECTION.get().unwrap();
+                let mut book_dir = create_book_dir(connection);
                 book_dir
                     .upload("lusiadas", LUSIADAS1, basic_metadata())
                     .unwrap();
@@ -705,7 +728,13 @@ mod tests {
             mode: FilterMode::All,
             tags: s(vec!["a", "d"]),
         };
-        let (book_dir, _books) = test_filter!(include.clone(), exclude.clone(), s(vec!["2", "3"]));
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let (mut book_dir, _books) = test_filter!(
+            include.clone(),
+            exclude.clone(),
+            s(vec!["2", "3"]),
+            connection
+        );
         let searcher = SearcherBuilder::new()
             .before_context(1)
             .after_context(1)

@@ -1,8 +1,13 @@
 use std::{collections::HashSet, env::temp_dir};
 
+use diesel::r2d2::ConnectionManager;
+use lazy_static::lazy_static;
 use rand::{distributions::Alphanumeric, Rng};
 
-use crate::config::{ensure_config_works, BookrabConfig};
+use crate::{
+    config::{ensure_config_works, BookrabConfig},
+    database::{PgPool, PgPooledConnection},
+};
 
 use super::RootBookDir;
 
@@ -110,10 +115,16 @@ Os Brâmenes se encheram de ódio tanto,
 Com seu veneno os morde enveja tanta,
 Que, persuadindo a isso o povo rudo,
 Determinam matá-lo, em fim de tudo.";
+
+lazy_static! {
+    pub static ref DBCONNECTION: PgPool = create_test_connection_pool();
+}
+
 pub fn s(v: Vec<&str>) -> HashSet<String> {
     v.into_iter().map(|v| v.to_string()).collect()
 }
-pub fn create_book_dir() -> RootBookDir {
+
+pub fn create_book_dir(connection: &mut PgPooledConnection) -> RootBookDir<'_> {
     let random_name: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(15)
@@ -122,21 +133,16 @@ pub fn create_book_dir() -> RootBookDir {
 
     let temp = temp_dir().to_path_buf();
     let book_dir = temp.join("bookrab-test-".to_string() + &random_name);
-
     RootBookDir::new(
         ensure_config_works(&BookrabConfig {
             book_path: book_dir,
             database_url: String::from("postgres://bookrab:bookStrongPass@localhost/bookrab_db"),
         })
         .clone(),
+        connection,
     )
 }
-pub fn root_for_tag_tests() -> RootBookDir {
-    let random_name: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(15)
-        .map(char::from)
-        .collect();
+pub fn root_for_tag_tests(connection: &mut PgPooledConnection) -> RootBookDir {
     let temp = temp_dir().to_path_buf();
     let book_dir = temp.join("tag_testing_bookrab");
 
@@ -145,9 +151,9 @@ pub fn root_for_tag_tests() -> RootBookDir {
         database_url: String::from("postgres://bookrab:bookStrongPass@localhost/bookrab_db"),
     };
     if config.book_path.exists() {
-        return RootBookDir::new(ensure_config_works(&config).clone());
+        return RootBookDir::new(ensure_config_works(&config).clone(), connection);
     }
-    let root = RootBookDir::new(ensure_config_works(&config).clone());
+    let root = RootBookDir::new(ensure_config_works(&config).clone(), connection);
     root.upload("1", LUSIADAS1, s(vec!["a", "b", "c", "d"]))
         .unwrap()
         .upload("2", LUSIADAS2, s(vec!["a", "b", "c"]))
@@ -158,8 +164,17 @@ pub fn root_for_tag_tests() -> RootBookDir {
         .unwrap();
     root
 }
+
 pub fn basic_metadata() -> HashSet<String> {
     vec!["Camões".to_string(), "Literatura Portuguesa".to_string()]
         .into_iter()
         .collect()
+}
+
+pub fn create_test_connection_pool() -> PgPool {
+    let connection_string = "postgres://bookrab:bookStrongPass@localhost/bookrab_db";
+    PgPool::builder()
+        .max_size(8)
+        .build(ConnectionManager::new(connection_string))
+        .expect("failed to create db connection_pool")
 }

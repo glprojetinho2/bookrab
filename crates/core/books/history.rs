@@ -1,70 +1,54 @@
-use chrono::NaiveDateTime;
 use diesel::prelude::*;
 
 use crate::{
     config::BookrabConfig,
-    database::history::{NewResult, NewSearchHistoryEntry},
+    database::{
+        history::{NewResult, NewSearchHistoryEntry, SearchHistoryEntry},
+        PgPooledConnection,
+    },
     errors::BookrabError,
+    schema,
 };
 
 use super::SearchResults;
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct SearchHistoryEntryJSON<'a> {
-    pub title: String,
-    pub pattern: &'a str,
-    pub results: Vec<String>,
-    pub date: NaiveDateTime,
-}
-
-#[derive(Debug, Queryable, Selectable)]
-#[diesel(table_name=crate::schema::search_history)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct SearchHistoryEntryPG {
-    pub id: i32,
-    pub title: String,
-    pub pattern: String,
-    pub date: NaiveDateTime,
-}
-
-#[derive(Debug, Queryable, Selectable)]
-#[diesel(table_name=crate::schema::search_results)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct SearchResult {
-    pub id: i32,
-    pub search_history_id: i32,
-    pub result: String,
-}
-
-pub struct SearchHistory {
+pub struct SearchHistory<'a> {
     pub config: BookrabConfig,
-    /// Connection to Postgresql (this disables the JSON history).
-    pub postgres_connection: PgConnection,
+    /// Connection to Postgresql
+    pub connection: &'a mut PgPooledConnection,
 }
 
-impl SearchHistory {
-    pub fn new(config: BookrabConfig, postgres_connection: PgConnection) -> SearchHistory {
-        SearchHistory {
-            config,
-            postgres_connection,
+impl<'a> SearchHistory<'a> {
+    pub fn new(config: BookrabConfig, connection: &mut PgPooledConnection) -> SearchHistory {
+        SearchHistory { config, connection }
+    }
+
+    /// Returns entire history.
+    pub fn get_entire_history(self) -> Result<Vec<SearchHistoryEntry>, BookrabError> {
+        match schema::search_history::table
+            .order(schema::search_history::columns::date.asc())
+            .load::<SearchHistoryEntry>(self.connection)
+        {
+            Ok(v) => Ok(v),
+            Err(e) => Err(e.into()),
         }
     }
 
     /// Appends a history entry to Postgresql table.
     /// It returns ownership of the results.
-    pub fn register_history<'a>(
-        &'a mut self,
+    pub fn register_history(
+        self,
         pattern: String,
         results: &'a Vec<SearchResults>,
     ) -> Result<&'a Vec<SearchResults>, BookrabError> {
-        let connection = &mut self.postgres_connection;
+        let connection = self.connection;
         for search_result in results {
             let in_db_history = diesel::insert_into(crate::schema::search_history::table)
                 .values(NewSearchHistoryEntry {
                     pattern: &pattern,
                     title: &search_result.title,
                 })
-                .returning(SearchHistoryEntryPG::as_returning())
+                .returning(SearchHistoryEntry::as_returning())
                 .get_result(connection)?;
 
             let mut search_result_vec = vec![];
@@ -79,5 +63,21 @@ impl SearchHistory {
                 .execute(connection)?;
         }
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SearchHistory;
+    use crate::books::test_utils::create_book_dir;
+    use crate::books::test_utils::DBCONNECTION;
+    #[test]
+    fn get_entire_history() {
+        //TODO: actually test this
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let config = create_book_dir(connection).config;
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let history = SearchHistory::new(config, connection);
+        history.get_entire_history().unwrap();
     }
 }

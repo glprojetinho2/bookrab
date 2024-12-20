@@ -7,6 +7,7 @@ use utoipa::ToSchema;
 
 use crate::{
     config::ensure_confy_works,
+    database::DB,
     errors::{ApiError, Bookrab400, Bookrab500},
 };
 
@@ -32,9 +33,9 @@ struct BookForm {
     )
 )]
 #[post("/upload")]
-pub async fn upload(MultipartForm(form): MultipartForm<BookForm>) -> impl Responder {
+pub async fn upload(MultipartForm(form): MultipartForm<BookForm>, mut db: DB) -> impl Responder {
     let config = ensure_confy_works();
-    let book_dir = RootBookDir::new(config);
+    let book_dir = RootBookDir::new(config, &mut db.connection);
 
     let mut file = form.book;
     if let Some(v) = file.content_type {

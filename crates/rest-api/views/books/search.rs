@@ -1,5 +1,6 @@
 use crate::{
     config::ensure_confy_works,
+    database::DB,
     errors::{ApiError, Bookrab400, Bookrab500},
 };
 use actix_web::{get, http::StatusCode, web, HttpResponse, HttpResponseBuilder};
@@ -60,7 +61,7 @@ struct SearchFormUtoipa {
     )
 )]
 #[get("/search")]
-pub async fn search(form: web::Query<SearchForm>) -> HttpResponse {
+pub async fn search(form: web::Query<SearchForm>, mut db: DB) -> HttpResponse {
     let config = ensure_confy_works();
     let searcher = SearcherBuilder::new()
         .after_context(form.after_context.unwrap_or_default())
@@ -70,7 +71,7 @@ pub async fn search(form: web::Query<SearchForm>) -> HttpResponse {
     let matcher_builder = builder
         .case_insensitive(form.case_insensitive.unwrap_or(false))
         .case_smart(form.case_smart.unwrap_or(false));
-    let root = RootBookDir::new(config);
+    let mut root = RootBookDir::new(config, &mut db.connection);
     //TODO: maybe there is a way to remove those .clone()'s?
     let include = Include {
         mode: form.include_mode.clone().unwrap_or_default(),
