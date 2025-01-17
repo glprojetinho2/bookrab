@@ -142,6 +142,13 @@ pub fn create_book_dir(connection: &mut PgPooledConnection) -> RootBookDir<'_> {
         connection,
     )
 }
+
+/// Generates a root folder for books.
+/// The following books will be available:
+/// title: "1", tags:  ["a", "b", "c", "d"]
+/// title: "2", tags:  ["a", "b", "c"]
+/// title: "3", tags:  ["a", "b"]
+/// title: "4", tags:  ["a"]
 pub fn root_for_tag_tests(connection: &mut PgPooledConnection) -> RootBookDir {
     let temp = temp_dir().to_path_buf();
     let book_dir = temp.join("tag_testing_bookrab");

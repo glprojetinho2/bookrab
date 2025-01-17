@@ -51,8 +51,8 @@ pub struct Include {
 /// Associates search results with the title of a book.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct SearchResults {
-    title: String,
-    results: Vec<String>,
+    pub title: String,
+    pub results: Vec<String>,
 }
 
 impl SearchResults {
@@ -104,14 +104,24 @@ impl<'a> RootBookDir<'a> {
         Ok(result.into_iter().next())
     }
 
+    /// Lists all tags from all books.
+    pub fn all_tags(&self) -> Result<HashSet<String>, BookrabError> {
+        let list = self.list()?;
+        let mut result = HashSet::new();
+        for elem in list {
+            result.extend(elem.tags);
+        }
+        Ok(result)
+    }
+
     /// Lists books according to their tags.
     /// No included tags = include all tags.
     /// No excluded tags = exclude no tags.
     /// These apply regardless of the mode of the inclusion/exclusion.
     pub fn list_by_tags(
         &self,
-        include: Include,
-        exclude: Exclude,
+        include: &Include,
+        exclude: &Exclude,
     ) -> Result<Vec<BookListElement>, BookrabError> {
         let list = self.list()?;
         let result = list
@@ -305,8 +315,8 @@ impl<'a> RootBookDir<'a> {
     /// This also generates history entries.
     pub fn search_by_tags(
         &mut self,
-        include: Include,
-        exclude: Exclude,
+        include: &Include,
+        exclude: &Exclude,
         pattern: String,
         searcher: Searcher,
         matcher_builder: RegexMatcherBuilder,
@@ -331,6 +341,8 @@ impl<'a> RootBookDir<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Borrow;
+
     use crate::books::test_utils::DBCONNECTION;
     use crate::books::RootBookDir;
     use grep_regex::RegexMatcherBuilder;
@@ -464,6 +476,23 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn all_tags() -> Result<(), BookrabError> {
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let book_dir = root_for_tag_tests(connection);
+        let tags = book_dir.all_tags()?;
+        assert_eq!(
+            tags,
+            HashSet::from([
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string()
+            ])
+        );
+        Ok(())
+    }
     macro_rules! test_filter {
         ($include:expr, $exclude: expr, $expected: expr, $connection: expr) => {{
             let book_dir = root_for_tag_tests($connection);
@@ -486,11 +515,11 @@ mod tests {
     fn filter_include_all() -> Result<(), anyhow::Error> {
         let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
-            Include {
+            &Include {
                 mode: FilterMode::All,
                 tags: s(vec!["d", "c"])
             },
-            Exclude {
+            &Exclude {
                 mode: FilterMode::All,
                 tags: s(vec![]),
             },
@@ -503,11 +532,11 @@ mod tests {
     fn filter_include_any() -> Result<(), anyhow::Error> {
         let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
-            Include {
+            &Include {
                 mode: FilterMode::Any,
                 tags: s(vec!["d", "c"])
             },
-            Exclude {
+            &Exclude {
                 mode: FilterMode::All,
                 tags: s(vec![]),
             },
@@ -520,11 +549,11 @@ mod tests {
     fn filter_exclude_all() -> Result<(), anyhow::Error> {
         let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
-            Include {
+            &Include {
                 mode: FilterMode::Any,
                 tags: s(vec![])
             },
-            Exclude {
+            &Exclude {
                 mode: FilterMode::All,
                 tags: s(vec!["d", "c"]),
             },
@@ -537,11 +566,11 @@ mod tests {
     fn filter_exclude_any() -> Result<(), anyhow::Error> {
         let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
-            Include {
+            &Include {
                 mode: FilterMode::Any,
                 tags: s(vec![])
             },
-            Exclude {
+            &Exclude {
                 mode: FilterMode::Any,
                 tags: s(vec!["d", "c"]),
             },
@@ -554,11 +583,11 @@ mod tests {
     fn filter_include_any_exclude_any() -> Result<(), anyhow::Error> {
         let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
-            Include {
+            &Include {
                 mode: FilterMode::Any,
                 tags: s(vec!["b"])
             },
-            Exclude {
+            &Exclude {
                 mode: FilterMode::Any,
                 tags: s(vec!["d", "c"]),
             },
@@ -571,11 +600,11 @@ mod tests {
     fn filter_include_all_exclude_all() -> Result<(), anyhow::Error> {
         let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
-            Include {
+            &Include {
                 mode: FilterMode::All,
                 tags: s(vec!["b"])
             },
-            Exclude {
+            &Exclude {
                 mode: FilterMode::All,
                 tags: s(vec!["b", "d"]),
             },
@@ -588,11 +617,11 @@ mod tests {
     fn filter_include_any_exclude_all() -> Result<(), anyhow::Error> {
         let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
-            Include {
+            &Include {
                 mode: FilterMode::Any,
                 tags: s(vec!["c", "d", "b"])
             },
-            Exclude {
+            &Exclude {
                 mode: FilterMode::All,
                 tags: s(vec!["a", "d"]),
             },
@@ -605,11 +634,11 @@ mod tests {
     fn filter_include_all_exclude_any() -> Result<(), anyhow::Error> {
         let connection = &mut DBCONNECTION.get().unwrap();
         test_filter!(
-            Include {
+            &Include {
                 mode: FilterMode::All,
                 tags: s(vec!["c", "d", "b"])
             },
-            Exclude {
+            &Exclude {
                 mode: FilterMode::Any,
                 tags: s(vec!["a", "d"]),
             },
@@ -720,21 +749,16 @@ mod tests {
 
     #[test]
     fn search_by_tags() -> Result<(), anyhow::Error> {
-        let include = Include {
+        let include = &Include {
             mode: FilterMode::Any,
             tags: s(vec!["c", "d", "b"]),
         };
-        let exclude = Exclude {
+        let exclude = &Exclude {
             mode: FilterMode::All,
             tags: s(vec!["a", "d"]),
         };
         let connection = &mut DBCONNECTION.get().unwrap();
-        let (mut book_dir, _books) = test_filter!(
-            include.clone(),
-            exclude.clone(),
-            s(vec!["2", "3"]),
-            connection
-        );
+        let (mut book_dir, _books) = test_filter!(include, exclude, s(vec!["2", "3"]), connection);
         let searcher = SearcherBuilder::new()
             .before_context(1)
             .after_context(1)

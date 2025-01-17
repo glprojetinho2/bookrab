@@ -1,0 +1,19 @@
+[package]
+name = "bookrab-tui"
+version = "0.1.0"
+authors = ["glprojetinho2 <gr20052512@gmail.com>"]
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+crossterm = "0.28.1"
+ratatui = "0.29.0"
+color-eyre = "0.6.3"
+bookrab-core = {version = "0.1.0", path = "../.."}
+grep-matcher = "0.1.7"
+grep-regex = "0.1.13"
+grep-searcher = "0.1.14"
+confy = "0.6.1"
+tui-input = "0.11.1"
+lazy_static = "1.5.0"
+diesel = { version = "2.2.6", features = ["chrono", "postgres", "r2d2"] }

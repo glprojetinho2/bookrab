@@ -22,4 +22,10 @@ thiserror = "2.0.3"
 
 
 [lib]
-path = "lib.rs"
+path = "crates/core/lib.rs"
+
+[workspace]
+members = [
+  "crates/rest-api",
+  "crates/tui"
+]
