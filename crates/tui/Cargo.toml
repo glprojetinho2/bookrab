@@ -17,3 +17,5 @@ confy = "0.6.1"
 tui-input = "0.11.1"
 lazy_static = "1.5.0"
 diesel = { version = "2.2.6", features = ["chrono", "postgres", "r2d2"] }
+strum = { version = "0.26.3", features = ["derive"] }
+arboard = { version = "3.4.1", features = ["wayland-data-control"] }
