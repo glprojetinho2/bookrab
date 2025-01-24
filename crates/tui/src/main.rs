@@ -1,12 +1,12 @@
 use crate::database::DBCONNECTION;
 use arboard::Clipboard;
 use bookrab_core::books::{Exclude, FilterMode, Include, RootBookDir, SearchResults};
-use bookrab_core::database::PgPooledConnection;
 use bookrab_core::errors::BookrabError;
 use config::ensure_confy_works;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::SearcherBuilder;
+use logs::initialize_logging;
 use ratatui::prelude::*;
 use ratatui::widgets::{ListItem, ListState, Wrap};
 use ratatui::{
@@ -18,15 +18,16 @@ use ratatui::{
     widgets::{Block, Borders, List, Paragraph},
 };
 use std::collections::HashSet;
-use std::iter::{Cycle, Filter, Iterator};
+use std::iter::Iterator;
 use std::{error::Error, io};
 use strum::EnumIter;
 use strum::IntoEnumIterator;
-use style::palette::tailwind::{BLACK, GREEN, RED, SLATE};
+use style::palette::tailwind::{GREEN, RED, SLATE};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 mod config;
 mod database;
+mod logs;
 
 const TEXT_FG_COLOR: Color = SLATE.c600;
 const INCLUDED_FG_COLOR: Color = GREEN.c500;
@@ -36,14 +37,16 @@ const SELECTED_STYLE: Style = Style::new().bg(SLATE.c300).add_modifier(Modifier:
 fn main() -> Result<(), Box<dyn Error>> {
     // setup terminal
     enable_raw_mode()?;
+    initialize_logging()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let connection = &mut DBCONNECTION.get().unwrap();
+    let root = RootBookDir::new(ensure_confy_works(), connection);
 
     // create app and run it
-    let app = App::new(connection);
+    let app = App::new(root);
     let res = run_app(&mut terminal, app);
 
     // restore terminal
@@ -100,10 +103,9 @@ struct App<'a> {
 }
 
 impl App<'_> {
-    fn new<'a>(connection: &mut PgPooledConnection) -> App {
-        let root_book_dir = RootBookDir::new(ensure_confy_works(), connection);
+    fn new<'a>(root: RootBookDir<'a>) -> App<'a> {
         let tags = TagList {
-            list: root_book_dir
+            list: root
                 .all_tags()
                 .unwrap()
                 .into_iter()
@@ -120,7 +122,7 @@ impl App<'_> {
         App {
             input: Input::default(),
             where_we_are: WhereWeAre::Nowhere,
-            root_book_dir,
+            root_book_dir: root,
             tags,
             include,
             exclude,
@@ -223,7 +225,8 @@ impl App<'_> {
         );
     }
 
-    fn search(&mut self) -> Result<Vec<SearchResults>, BookrabError> {
+    /// Searches the books. [`self.results`] is updated.
+    fn search(&mut self) -> Result<(), BookrabError> {
         let query = self.input.value();
         let searcher = SearcherBuilder::new().build();
         let regex_builder = RegexMatcherBuilder::new();
@@ -236,10 +239,8 @@ impl App<'_> {
             searcher,
             regex_builder,
         )?;
-        Ok(results)
-    }
-    fn update_results(&mut self) {
-        self.results = self.search().unwrap();
+        self.results = results;
+        Ok(())
     }
 
     /// Cycles through selectable items on the screen.
@@ -273,21 +274,12 @@ impl App<'_> {
         self.cycle_position(positions);
     }
 
-    fn select_no_tags(&mut self) {
-        self.tags.state.select(None);
-    }
-
     fn select_next_tag(&mut self) {
         self.tags.state.select_next();
     }
+
     fn select_previous_tag(&mut self) {
         self.tags.state.select_previous();
-    }
-    fn select_first_tag(&mut self) {
-        self.tags.state.select_first();
-    }
-    fn select_last_tag(&mut self) {
-        self.tags.state.select_last();
     }
 
     /// Changes status of selected tag in the following way
@@ -338,7 +330,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     app.where_we_are = WhereWeAre::Nowhere;
                 }
                 KeyCode::Enter => {
-                    app.update_results();
+                    app.search().unwrap();
                 }
                 KeyCode::Tab => {
                     app.next_position();
@@ -508,5 +500,84 @@ impl From<&TagList> for Exclude {
             mode: FilterMode::Any,
             tags: excluded,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::database::DBCONNECTION;
+    use crate::{color_match, color_match_html, App};
+    use arboard::Clipboard;
+    use bookrab_core::books::test_utils::root_for_tag_tests;
+    use bookrab_core::books::SearchResults;
+    use ratatui::prelude::*;
+    use ratatui::text::{Line, Span};
+
+    #[test]
+    fn test_color_match() {
+        let color = "not a match\nstill not a [matched]match[/matched]\nwhat??";
+        let result = color_match(color);
+        assert_eq!(
+            result,
+            Line::from_iter([
+                Span::from("not a match\nstill not a "),
+                Span::from("match").red(),
+                Span::from("\nwhat??")
+            ])
+        );
+    }
+
+    #[test]
+    fn test_color_match_html() {
+        let color = "not a match\nstill not a [matched]match[/matched]\nwhat??";
+        let result = color_match_html(String::from(color));
+        assert_eq!(
+            result,
+            String::from(
+                "not a match\nstill not a <span style=\"color: red\">match</span>\nwhat??"
+            )
+        );
+    }
+
+    #[test]
+    fn test_search_and_copy() {
+        let connection = &mut DBCONNECTION.get().unwrap();
+        let root = root_for_tag_tests(connection);
+
+        // create app and run it
+        let mut app = App::new(root);
+        app.input = "armas".into();
+        app.search().unwrap();
+        assert_eq!(
+            app.results,
+            vec![
+                SearchResults {
+                    title: "1".into(),
+                    results: vec![
+                        "Se as [matched]armas[/matched] queres ver, como tens dito,\n".into()
+                    ]
+                },
+                SearchResults {
+                    title: "2".into(),
+                    results: vec!["As [matched]armas[/matched] e os barões assinalados,\n".into()]
+                },
+                SearchResults {
+                    title: "3".into(),
+                    results: vec![]
+                },
+                SearchResults {
+                    title: "4".into(),
+                    results: vec![]
+                }
+            ]
+        );
+
+        app.copy_results().expect("App could not copy results");
+        let copied = Clipboard::new()
+            .expect("Clipboard not supported")
+            .get()
+            .text()
+            .expect("empty or non-UTF-8 clipboard");
+        assert_eq!(copied, "<div><span style=\"color: blue\">1</span></div><p>Se as <span style=\"color: red\">armas</span> queres ver, como tens dito,\n</p><div><span style=\"color: blue\">2</span></div><p>As <span style=\"color: red\">armas</span> e os barões assinalados,\n</p>");
     }
 }

@@ -40,15 +40,15 @@ enum FilterModeUtoipa {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 struct SearchFormUtoipa {
-    pattern: String,
     after_context: Option<usize>,
     before_context: Option<usize>,
     case_insensitive: Option<bool>,
     case_smart: Option<bool>,
-    include_tags: Option<Vec<String>>,
-    include_mode: Option<FilterModeUtoipa>,
-    exclude_tags: Option<Vec<String>>,
     exclude_mode: Option<FilterModeUtoipa>,
+    exclude_tags: Option<Vec<String>>,
+    include_mode: Option<FilterModeUtoipa>,
+    include_tags: Option<Vec<String>>,
+    pattern: String,
 }
 
 /// Searches books filtered by tags.
@@ -92,8 +92,8 @@ pub async fn search(form: web::Query<SearchForm>, mut db: DB) -> HttpResponse {
             .collect(),
     };
     let search_results = match root.search_by_tags(
-        include,
-        exclude,
+        &include,
+        &exclude,
         form.pattern.clone(),
         searcher,
         matcher_builder.clone(),

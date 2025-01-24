@@ -1,6 +1,6 @@
 mod history;
 mod sink;
-mod test_utils;
+pub mod test_utils;
 mod utils;
 
 use crate::{config::BookrabConfig, database::PgPooledConnection};
